@@ -115,7 +115,7 @@ jobs:
       - name: 拉回三端产物
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-x64*"
+          pattern: "{linux-x64,windows-x64,android-arm64}"
           path: dist/release/${{ needs.meta.outputs.tag }}
 
       - name: 生成 SHA256SUMS.txt + release.json
