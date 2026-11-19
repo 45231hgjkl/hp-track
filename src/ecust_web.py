@@ -495,7 +495,21 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
 
+def _force_utf8_stdio():
+    """Windows 控制台/CI 的默认代码页可能是 cp1252/GBK，中文 print 会 UnicodeEncodeError。
+
+    冻结产物（exe）里绝对不能因为一行日志把服务打死，所以统一把 stdio 设成 UTF-8；
+    失败就退化成 replace，不抛异常。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(description="华东理工健康跑 WebUI")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--browser", action="store_true", help="启动后自动打开浏览器")

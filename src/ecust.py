@@ -351,6 +351,11 @@ def cmd_session(a):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):     # 非 UTF-8 控制台下中文输出会炸
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
 

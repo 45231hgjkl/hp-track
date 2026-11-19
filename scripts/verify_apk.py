@@ -55,7 +55,9 @@ def main() -> int:
                         inner_names = inner.namelist()
                 except Exception:
                     inner_names = []
-                miss = [m for m in MODULES if m not in inner_names]
+                # Chaquopy 可能存 .py 也可能存 .pyc（取决于构建机），两种都算通过
+                packed = {n.rsplit(".", 1)[0] for n in inner_names}
+                miss = [m for m in MODULES if m.rsplit(".", 1)[0] not in packed]
                 if miss:
                     fails.append(f"app.imy 缺: {miss}")
                     print(f"FAIL K1 app.imy 缺 {miss}  （实际: {inner_names[:10]}）")
