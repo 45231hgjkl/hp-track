@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只构建不发布"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: 读取版本
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release: v$VERSION"
+
+  linux:
+    name: Linux pyz
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/build_pyz.py
+      - run: python scripts/verify_artifacts.py dist/release/v$(cat VERSION)/linux-x64/hp-track.pyz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/release/v*/linux-x64/
+          if-no-files-found: error
+
+  windows:
+    name: Windows exe
+    needs: meta
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - shell: pwsh
+        run: ./scripts/build_windows.ps1 -PythonExe python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/release/v*/windows-x64/
+          if-no-files-found: error
+
+  android:
+    name: Android apk
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: 安装 SDK 组件
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+      - name: 构建 + 结构验收
+        run: |
+          chmod +x scripts/build_apk.sh
+          ./scripts/build_apk.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          path: dist/release/v*/android-arm64/
+          if-no-files-found: error
+
+  publish:
+    name: 汇总清单 + 发 Release
+    needs: [meta, linux, windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 拉回三端产物（artifact 名即平台目录名）
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-*"
+          path: dist/release/${{ needs.meta.outputs.tag }}
+
+      - name: 生成 SHA256SUMS.txt + release.json
+        run: |
+          ls -R dist/release/${{ needs.meta.outputs.tag }}
+          python scripts/manifest.py --check
+          cat dist/release/${{ needs.meta.outputs.tag }}/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: dist/release/${{ needs.meta.outputs.tag }}/{SHA256SUMS.txt,release.json}
+          if-no-files-found: error
+
+      - name: 发布
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          R="dist/release/$TAG"
+          gh release create "$TAG" \
+            "$R/windows-x64/hp-track.exe" \
+            "$R/linux-x64/hp-track.pyz" \
+            "$R/android-arm64/hp-track.apk" \
+            "$R/SHA256SUMS.txt" \
+            "$R/release.json" \
+            --title "hp-track v$VERSION" \
+            --notes-file docs/CHANGELOG.md \
+            --verify-tag

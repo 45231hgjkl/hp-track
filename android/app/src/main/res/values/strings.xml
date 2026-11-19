@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">hp-track</string>
+    <string name="channel_name">本地跑步服务</string>
+    <string name="channel_desc">保持本地服务在后台运行，任务结束后可点「停止」</string>
+    <string name="notif_title">hp-track 正在运行</string>
+    <string name="notif_text">本地服务 127.0.0.1:%1$d</string>
+    <string name="notif_stop">停止</string>
+</resources>

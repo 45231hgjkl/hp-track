@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags-ignore: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  lint-and-test:
+    name: 代码检查 + 离线回归
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装检查工具
+        run: python -m pip install --disable-pip-version-check ruff
+
+      - name: ruff
+        run: ruff check src scripts tests
+
+      - name: 字节码编译（src + scripts）
+        run: python -m compileall -q src scripts
+
+      - name: 登录链路离线自测（29 项，不联网）
+        run: python tests/selftest_login.py
+
+      - name: 安卓入口桌面模拟
+        run: python scripts/sim_entry.py
+
+  linux:
+    name: Linux pyz
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建
+        run: python scripts/build_pyz.py
+
+      - name: 冒烟
+        run: python scripts/verify_artifacts.py dist/release/v$(cat VERSION)/linux-x64/hp-track.pyz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/release/v*/linux-x64/
+          if-no-files-found: error
+
+  windows:
+    name: Windows exe
+    needs: lint-and-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建 + 冒烟
+        shell: pwsh
+        run: ./scripts/build_windows.ps1 -PythonExe python
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/release/v*/windows-x64/
+          if-no-files-found: error
+
+  android:
+    name: Android apk
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK 组件
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: 构建 APK
+        run: |
+          chmod +x scripts/build_apk.sh
+          ./scripts/build_apk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          path: dist/release/v*/android-arm64/
+          if-no-files-found: error

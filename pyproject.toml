@@ -1,0 +1,19 @@
+# -*- mode: toml -*-
+# 仅工具配置：本项目不是 pip 包，运行时零第三方依赖（见 src/pure_aes.py）。
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = [".build", "dist", "build", "android"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # 长行由 line-length 兜底，中文注释不强行折断
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+"src/*" = ["E402"]
+
