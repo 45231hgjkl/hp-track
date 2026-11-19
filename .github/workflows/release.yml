@@ -17,6 +17,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   meta:
     name: 读取版本
@@ -43,11 +48,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python scripts/build_pyz.py
-      - run: python scripts/verify_artifacts.py dist/release/v$(cat VERSION)/linux-x64/hp-track.pyz
+      - run: python scripts/verify_artifacts.py dist/release/${{ needs.meta.outputs.tag }}/linux-x64/hp-track.pyz
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: dist/release/v*/linux-x64/
+          path: dist/release/${{ needs.meta.outputs.tag }}/linux-x64/hp-track.pyz
           if-no-files-found: error
 
   windows:
@@ -64,7 +69,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: dist/release/v*/windows-x64/
+          path: dist/release/${{ needs.meta.outputs.tag }}/windows-x64/hp-track.exe
           if-no-files-found: error
 
   android:
@@ -93,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: android-arm64
-          path: dist/release/v*/android-arm64/
+          path: dist/release/${{ needs.meta.outputs.tag }}/android-arm64/hp-track.apk
           if-no-files-found: error
 
   publish:
@@ -106,22 +111,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 拉回三端产物（artifact 名即平台目录名）
+      # artifact 名就是平台目录名：v<ver>/linux-x64/hp-track.pyz ...
+      - name: 拉回三端产物
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-*"
+          pattern: "*-x64*"
           path: dist/release/${{ needs.meta.outputs.tag }}
 
       - name: 生成 SHA256SUMS.txt + release.json
         run: |
-          ls -R dist/release/${{ needs.meta.outputs.tag }}
+          find dist/release -type f | sort
           python scripts/manifest.py --check
           cat dist/release/${{ needs.meta.outputs.tag }}/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-manifest
-          path: dist/release/${{ needs.meta.outputs.tag }}/{SHA256SUMS.txt,release.json}
+          path: dist/release/${{ needs.meta.outputs.tag }}/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: 发布

@@ -52,16 +52,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - id: ver
+        run: echo "tag=v$(tr -d '\r\n' < VERSION)" >> "$GITHUB_OUTPUT"
+
       - name: 构建
         run: python scripts/build_pyz.py
 
       - name: 冒烟
-        run: python scripts/verify_artifacts.py dist/release/v$(cat VERSION)/linux-x64/hp-track.pyz
+        run: python scripts/verify_artifacts.py dist/release/${{ steps.ver.outputs.tag }}/linux-x64/hp-track.pyz
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: dist/release/v*/linux-x64/
+          path: dist/release/${{ steps.ver.outputs.tag }}/linux-x64/hp-track.pyz
           if-no-files-found: error
 
   windows:
@@ -74,6 +77,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - id: ver
+        shell: bash
+        run: echo "tag=v$(tr -d '\r\n' < VERSION)" >> "$GITHUB_OUTPUT"
+
       - name: 构建 + 冒烟
         shell: pwsh
         run: ./scripts/build_windows.ps1 -PythonExe python
@@ -81,7 +88,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: dist/release/v*/windows-x64/
+          path: dist/release/${{ steps.ver.outputs.tag }}/windows-x64/hp-track.exe
           if-no-files-found: error
 
   android:
@@ -107,6 +114,9 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
+      - id: ver
+        run: echo "tag=v$(tr -d '\r\n' < VERSION)" >> "$GITHUB_OUTPUT"
+
       - name: 构建 APK
         run: |
           chmod +x scripts/build_apk.sh
@@ -115,5 +125,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: android-arm64
-          path: dist/release/v*/android-arm64/
+          path: dist/release/${{ steps.ver.outputs.tag }}/android-arm64/hp-track.apk
           if-no-files-found: error
