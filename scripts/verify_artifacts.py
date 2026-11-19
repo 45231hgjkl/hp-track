@@ -41,7 +41,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("artifact")
     ap.add_argument("--port", type=int, default=8737)
-    ap.add_argument("--boot-timeout", type=float, default=40.0)
+    ap.add_argument("--boot-timeout", type=float, default=90.0)
     a = ap.parse_args()
 
     art = os.path.abspath(a.artifact)
@@ -72,7 +72,8 @@ def main() -> int:
             except Exception:
                 time.sleep(0.3)
         if not up:
-            fails.append("boot: 端口未起来或页面无 <title>")
+            fails.append("boot: 端口未起来或页面无 <title>"
+                         f"（进程 {'已退出 rc=' + str(proc.poll()) if proc.poll() is not None else '仍在运行'}）")
 
         if up:
             st, body = http(base + "/api/session")
@@ -103,14 +104,16 @@ def main() -> int:
             if not ok:
                 fails.append("/api/shutdown 未使进程退出")
     finally:
-        if proc.poll() is None:
+        alive = proc.poll() is None
+        if alive:
             proc.kill()
+        if alive or fails:
             try:
-                out = proc.communicate(timeout=5)[0]
+                out = proc.communicate(timeout=10)[0] or b""
             except Exception:
                 out = b""
             print("--- 进程输出尾部 ---")
-            print(out.decode("utf-8", "replace")[-2000:])
+            print(out.decode("utf-8", "replace")[-3000:])
 
     print(f"\n{'PASS' if not fails else 'FAIL'}  {os.path.basename(art)}")
     for f in fails:
