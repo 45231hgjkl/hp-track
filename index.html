@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>健康跑控制台</title>
+<style>
+:root{
+  --bg:#0b0e13; --card:#151a22; --card2:#1a2028; --line:#232a35;
+  --text:#e6eaf0; --muted:#8b96a8; --accent:#22c55e; --accent2:#16a34a;
+  --warn:#f59e0b; --err:#ef4444; --radius:16px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  min-height:100vh;padding:28px 16px 60px;
+}
+.wrap{max-width:560px;margin:0 auto}
+.hidden{display:none!important}
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px;margin-bottom:16px;
+}
+h1{font-size:22px;margin:0 0 4px;letter-spacing:.5px}
+h2{font-size:15px;margin:0 0 14px;color:var(--muted);font-weight:600;letter-spacing:.4px}
+.brand{text-align:center;margin:26px 0 26px}
+.brand .logo{
+  width:56px;height:56px;border-radius:18px;margin:0 auto 14px;
+  background:linear-gradient(135deg,var(--accent),#0891b2);
+  display:grid;place-items:center;font-size:26px;
+  box-shadow:0 10px 30px rgba(34,197,94,.25);
+}
+.brand p{color:var(--muted);font-size:13px;margin:6px 0 0}
+
+.tabs{display:flex;gap:8px;background:#11161d;padding:5px;border-radius:12px;margin-bottom:18px}
+.tabs button{
+  flex:1;padding:10px;border:0;border-radius:9px;background:transparent;color:var(--muted);
+  font-size:14px;font-weight:600;cursor:pointer;transition:.18s;
+}
+.tabs button.active{background:var(--accent);color:#06210f}
+
+label{display:block;font-size:12px;color:var(--muted);margin:14px 0 6px;letter-spacing:.4px}
+input{
+  width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);
+  background:#0e131a;color:var(--text);font-size:15px;outline:0;transition:.18s;
+}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(34,197,94,.12)}
+input.bad{border-color:var(--err);box-shadow:0 0 0 3px rgba(239,68,68,.12)}
+.row{display:flex;gap:10px}
+.row input{flex:1}
+.pw{position:relative}
+.pw input{padding-right:56px}
+.pw .eye{
+  position:absolute;right:8px;top:50%;transform:translateY(-50%);
+  border:0;background:transparent;color:var(--muted);font-size:12px;
+  padding:8px 10px;cursor:pointer;border-radius:8px;
+}
+.pw .eye:hover{color:var(--text)}
+.btn{
+  width:100%;padding:14px;border:0;border-radius:12px;cursor:pointer;font-size:15px;
+  font-weight:600;transition:.18s;background:var(--accent);color:#06210f;margin-top:18px;
+}
+.btn:hover:not(:disabled){background:var(--accent2)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text);margin:0}
+.btn.small{width:auto;padding:0 16px;margin:0;height:46px;white-space:nowrap;font-size:14px}
+.btn.danger{background:transparent;border:1px solid #3a2026;color:#f87171;margin-top:0}
+.btn.danger:hover:not(:disabled){background:rgba(239,68,68,.08);border-color:#5a2e35}
+
+.msg{margin-top:14px;font-size:13px;min-height:20px;color:var(--muted);line-height:1.6}
+.msg.err{color:var(--err)}
+.msg.ok{color:var(--accent)}
+.msg.warn{color:var(--warn)}
+
+.user-top{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+.avatar{
+  width:52px;height:52px;border-radius:16px;object-fit:cover;background:#0e131a;
+  border:1px solid var(--line);
+}
+.user-name{font-size:17px;font-weight:600}
+.user-sub{font-size:12px;color:var(--muted)}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}
+.stat{background:#0e131a;border-radius:12px;padding:12px 10px;text-align:center}
+.stat b{display:block;font-size:19px;font-weight:700}
+.stat span{font-size:11px;color:var(--muted)}
+.bar{height:7px;border-radius:99px;background:#0e131a;overflow:hidden;margin-top:14px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#06b6d4);border-radius:99px;transition:.5s}
+
+.presets{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.preset{
+  padding:14px 8px;border-radius:12px;border:1px solid var(--line);background:#0e131a;
+  color:var(--text);cursor:pointer;text-align:center;transition:.18s;
+}
+.preset.on{border-color:var(--accent);background:rgba(34,197,94,.1)}
+.preset b{display:block;font-size:17px}
+.preset span{font-size:11px;color:var(--muted)}
+
+.ringbox{display:flex;align-items:center;gap:22px;margin:20px 0 4px}
+.ring{
+  --p:0;position:relative;width:132px;height:132px;border-radius:50%;flex:0 0 auto;
+  background:conic-gradient(var(--accent) calc(var(--p)*1%),#1c2430 0);
+  display:grid;place-items:center;transition:.4s;
+}
+.ring::after{
+  content:'';position:absolute;inset:9px;border-radius:50%;background:var(--card);
+}
+.ring .val{position:relative;z-index:1;text-align:center}
+.ring .val b{display:block;font-size:23px;font-weight:700;font-variant-numeric:tabular-nums}
+.ring .val span{font-size:11px;color:var(--muted)}
+.phase{flex:1}
+.phase .tag{
+  display:inline-block;padding:3px 10px;border-radius:99px;font-size:11px;
+  background:rgba(34,197,94,.12);color:var(--accent);margin-bottom:8px;
+}
+.phase .tag.err{background:rgba(239,68,68,.12);color:var(--err)}
+.phase p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
+
+.log{
+  background:#0a0d12;border:1px solid var(--line);border-radius:12px;
+  padding:12px 14px;max-height:190px;overflow:auto;margin-top:16px;
+  font:12px/1.75 ui-monospace,SFMono-Regular,Consolas,monospace;color:#9aa6b8;
+  white-space:pre-wrap;word-break:break-all;
+}
+.log:empty::before{content:'等待任务…';color:#4b5563}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;padding:0 0 10px}
+td{padding:9px 0;border-top:1px solid #1c2330}
+td.n{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+.pill{font-size:11px;padding:2px 9px;border-radius:99px}
+.pill.ok{background:rgba(34,197,94,.13);color:var(--accent)}
+.pill.no{background:rgba(239,68,68,.12);color:#f87171}
+.foot{text-align:center;color:#4b5563;font-size:11px;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 登录 -->
+  <section id="loginView">
+    <div class="brand">
+      <div class="logo">🏃</div>
+      <h1>健康跑控制台</h1>
+      <p>华东理工大学 · 校园跑</p>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button class="active" data-tab="pwd">密码登录</button>
+        <button data-tab="sms">验证码登录</button>
+      </div>
+
+      <label>手机号</label>
+      <input id="phone" type="tel" inputmode="numeric"
+             placeholder="11 位手机号" autocomplete="username">
+
+      <div id="panePwd">
+        <label>密码</label>
+        <div class="pw">
+          <input id="password" type="password" placeholder="登录密码" autocomplete="current-password">
+          <button class="eye" id="eye" type="button">显示</button>
+        </div>
+        <button class="btn" id="btnPwd">登 录</button>
+      </div>
+
+      <div id="paneSms" class="hidden">
+        <label>短信验证码</label>
+        <div class="row">
+          <input id="code" type="tel" inputmode="numeric" placeholder="验证码" maxlength="8" autocomplete="one-time-code">
+          <button class="btn small ghost" id="btnSend" type="button">获取验证码</button>
+        </div>
+        <button class="btn" id="btnSms">登 录</button>
+      </div>
+
+      <div class="msg" id="loginMsg"></div>
+    </div>
+    <div class="foot">本地运行 · 数据不出本机</div>
+  </section>
+
+  <!-- 主界面 -->
+  <section id="mainView" class="hidden">
+    <div class="card">
+      <div class="user-top">
+        <img class="avatar" id="avatar" alt="">
+        <div style="flex:1">
+          <div class="user-name" id="uName">—</div>
+          <div class="user-sub" id="uSub">—</div>
+        </div>
+        <button class="btn small danger" id="btnLogout" type="button">退出</button>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="sKm">0</b><span>累计公里</span></div>
+        <div class="stat"><b id="sTarget">0</b><span>目标公里</span></div>
+        <div class="stat"><b id="sPct">0%</b><span>完成度</span></div>
+      </div>
+      <div class="bar"><i id="barFill" style="width:0%"></i></div>
+    </div>
+
+    <div class="card">
+      <h2>自动校园跑</h2>
+      <div class="presets" id="presets">
+        <button class="preset on" data-m="2000"><b>2.0 km</b><span>达标线 · 7分</span></button>
+        <button class="preset" data-m="3000"><b>3.0 km</b><span>10 分钟</span></button>
+        <button class="preset" data-m="5000"><b>5.0 km</b><span>17 分钟</span></button>
+      </div>
+
+      <div class="ringbox">
+        <div class="ring" id="ring" style="--p:0">
+          <div class="val"><b id="rTime">00:00</b><span id="rTotal">/ 00:00</span></div>
+        </div>
+        <div class="phase">
+          <div class="tag" id="phaseTag">就绪</div>
+          <p id="phaseText">选择里程后开始，服务端按真实耗时校验，等待期间不要关闭页面。</p>
+        </div>
+      </div>
+
+      <button class="btn" id="btnRun">开始跑步</button>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div class="card">
+      <h2>最近记录</h2>
+      <table>
+        <thead><tr><th>时间</th><th>里程</th><th>时长</th><th style="text-align:right">状态</th></tr></thead>
+        <tbody id="hisBody"><tr><td colspan="4" style="color:#4b5563">—</td></tr></tbody>
+      </table>
+    </div>
+    <div class="foot">本地运行 · 仅供研究</div>
+  </section>
+
+  <button class="btn ghost hidden" id="btnShutdown" type="button"
+          style="margin-top:14px">关闭本地服务</button>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (t, c) => { const e = document.createElement(t); if (c) e.className = c; return e; };
+const LS_PHONE = 'hp_track_phone';
+
+let ME = null, MILEAGE = 2000, POLL = null, LAST_RESULT = null;
+let RELOGIN_DONE = false, TAB = 'pwd';
+
+// ---------- HTTP ----------
+async function api(path, body) {
+  let res;
+  try {
+    const opt = body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    };
+    res = await fetch(path, opt);
+  } catch (e) {
+    return { ok: false, error: '本地服务无响应，确认 ecust_web.py 还在运行' };
+  }
+  let j;
+  try { j = await res.json(); }
+  catch (e) { return { ok: false, error: `服务返回异常 HTTP ${res.status}` }; }
+  if (j && j.relogin) needRelogin(j.error);
+  return j;
+}
+
+function needRelogin(msg) {
+  if (RELOGIN_DONE || !ME) return;
+  RELOGIN_DONE = true;
+  if (POLL) { clearInterval(POLL); POLL = null; }
+  ME = null;
+  $('#mainView').classList.add('hidden');
+  $('#loginView').classList.remove('hidden');
+  $('#password').value = '';
+  showTab('pwd');
+  setMsg(msg || '登录已过期，请重新登录', 'warn');
+}
+
+const fmt = s => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+
+// ---------- 登录 UI ----------
+function setMsg(t, cls = '') {
+  const m = $('#loginMsg');
+  m.textContent = t;
+  m.className = 'msg ' + cls;
+}
+
+function clearBad() {
+  ['#phone', '#password', '#code'].forEach(s => $(s).classList.remove('bad'));
+}
+
+function showTab(tab) {
+  TAB = tab;
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
+  $('#panePwd').classList.toggle('hidden', tab !== 'pwd');
+  $('#paneSms').classList.toggle('hidden', tab !== 'sms');
+}
+
+document.querySelectorAll('.tabs button').forEach(b => {
+  b.onclick = () => { showTab(b.dataset.tab); setMsg(''); };
+});
+
+$('#eye').onclick = () => {
+  const p = $('#password');
+  const show = p.type === 'password';
+  p.type = show ? 'text' : 'password';
+  $('#eye').textContent = show ? '隐藏' : '显示';
+};
+
+// 只留数字：粘贴 155-8391-0181 或 +86 155 8391 0181 都能归一，
+// 不依赖 maxlength（浏览器会先按字符数截断，把号码尾巴吃掉）
+function normalizePhone(raw) {
+  let d = raw.replace(/\D/g, '');
+  if (d.length > 11) {
+    if (d.startsWith('0086')) d = d.slice(4);
+    else if (d.startsWith('86')) d = d.slice(2);
+  }
+  return d.slice(0, 11);
+}
+$('#phone').addEventListener('input', () => {
+  const d = normalizePhone($('#phone').value);
+  if ($('#phone').value !== d) $('#phone').value = d;
+});
+$('#code').addEventListener('input', () => {
+  const d = $('#code').value.replace(/\D/g, '').slice(0, 8);
+  if ($('#code').value !== d) $('#code').value = d;
+});
+
+// 回车提交
+$('#password').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnPwd').click(); });
+$('#code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnSms').click(); });
+$('#phone').addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  (TAB === 'pwd' ? $('#password') : $('#code')).focus();
+});
+
+function bad(field) {
+  const map = { phone: '#phone', password: '#password', code: '#code' };
+  const s = map[field];
+  if (s) $(s).classList.add('bad');
+}
+
+$('#btnPwd').onclick = async () => {
+  const phone = $('#phone').value.trim(), password = $('#password').value;
+  clearBad(); setMsg('');
+  if (!/^1[3-9]\d{9}$/.test(phone)) { bad('phone'); return setMsg('手机号格式不对', 'err'); }
+  if (!password) { bad('password'); return setMsg('请输入密码', 'err'); }
+
+  const btn = $('#btnPwd');
+  btn.disabled = true; btn.textContent = '登录中…';
+  setMsg('正在连接 run.ecust.edu.cn…');
+  const r = await api('/api/login/password', { phone, password });
+  btn.disabled = false; btn.textContent = '登 录';
+
+  if (r.ok) {
+    rememberPhone(phone);
+    $('#password').value = '';
+    setMsg('');
+    enter(r.user);
+  } else {
+    if (r.field) bad(r.field);
+    setMsg(r.error || '登录失败', 'err');
+  }
+};
+
+function rememberPhone(p) {
+  try { localStorage.setItem(LS_PHONE, p); } catch (e) {}
+}
+
+let smsLeft = 0, smsTimer = null;
+function startCooldown(sec) {
+  smsLeft = sec;
+  $('#btnSend').disabled = true;
+  $('#btnSend').textContent = `${smsLeft}s`;
+  clearInterval(smsTimer);
+  smsTimer = setInterval(() => {
+    smsLeft--;
+    if (smsLeft <= 0) {
+      clearInterval(smsTimer); smsTimer = null;
+      $('#btnSend').disabled = false;
+      $('#btnSend').textContent = '获取验证码';
+    } else {
+      $('#btnSend').textContent = `${smsLeft}s`;
+    }
+  }, 1000);
+}
+
+$('#btnSend').onclick = async () => {
+  const phone = $('#phone').value.trim();
+  clearBad(); setMsg('');
+  if (!/^1[3-9]\d{9}$/.test(phone)) { bad('phone'); return setMsg('手机号格式不对', 'err'); }
+  if (smsLeft > 0) return;
+
+  $('#btnSend').disabled = true; $('#btnSend').textContent = '发送中…';
+  const r = await api('/api/login/sms/send', { phone });
+  if (r.ok) {
+    rememberPhone(phone);
+    setMsg(r.message || '验证码已发送', 'ok');
+    startCooldown(r.cooldown || 60);
+    $('#code').focus();
+  } else {
+    $('#btnSend').disabled = false; $('#btnSend').textContent = '获取验证码';
+    if (r.cooldown) { startCooldown(r.cooldown); return setMsg(r.error, 'warn'); }
+    setMsg(r.error || '发送失败', 'err');
+  }
+};
+
+$('#btnSms').onclick = async () => {
+  const phone = $('#phone').value.trim(), code = $('#code').value.trim();
+  clearBad(); setMsg('');
+  if (!/^1[3-9]\d{9}$/.test(phone)) { bad('phone'); return setMsg('手机号格式不对', 'err'); }
+  if (!/^\d{4,8}$/.test(code)) { bad('code'); return setMsg('请输入验证码', 'err'); }
+
+  const btn = $('#btnSms');
+  btn.disabled = true; btn.textContent = '登录中…';
+  const r = await api('/api/login/sms/verify', { phone, code });
+  btn.disabled = false; btn.textContent = '登 录';
+
+  if (r.ok) {
+    rememberPhone(phone);
+    $('#code').value = '';
+    clearInterval(smsTimer); smsTimer = null; smsLeft = 0;
+    $('#btnSend').disabled = false; $('#btnSend').textContent = '获取验证码';
+    setMsg('');
+    enter(r.user);
+  } else {
+    if (r.field) bad(r.field);
+    setMsg(r.error || '登录失败', 'err');
+  }
+};
+
+$('#btnLogout').onclick = async () => {
+  if (!confirm('退出登录？本地缓存会话会一并清除。')) return;
+  $('#btnLogout').disabled = true;
+  const r = await api('/api/logout', { purge: true });
+  if (POLL) { clearInterval(POLL); POLL = null; }
+  ME = null;
+  const note = (r.warning || '已退出登录');
+  $('#mainView').classList.add('hidden');
+  $('#loginView').classList.remove('hidden');
+  setMsg(note, r.warning ? 'warn' : 'ok');
+  $('#btnLogout').disabled = false;
+  prefillPhone();
+};
+
+// ---------- 主界面 ----------
+function enter(user) {
+  if (!user) { setMsg('登录成功但未取到用户信息', 'err'); return; }
+  ME = user;
+  RELOGIN_DONE = false;
+  $('#loginView').classList.add('hidden');
+  $('#mainView').classList.remove('hidden');
+  renderUser();
+  loadHistory();
+  poll();
+  if (!POLL) POLL = setInterval(poll, 1000);
+}
+
+function renderUser() {
+  if (!ME) return;
+  const u = ME;
+  $('#uName').textContent = u.nickname || u.name || '同学';
+  $('#uSub').textContent = [u.school, u.faculty, u.myclass].filter(Boolean).join(' · ');
+  if (u.headimg) $('#avatar').src = u.headimg; else $('#avatar').removeAttribute('src');
+  const km = Number(u.mileage_km ?? 0);
+  const tgt = Number(u.target_mileage ?? 0);
+  const pct = Math.min(100, Math.round((km / (tgt || 1)) * 100));
+  $('#sKm').textContent = km.toFixed(2);
+  $('#sTarget').textContent = tgt;
+  $('#sPct').textContent = (u.finished_percent ?? 0) + '%';
+  $('#barFill').style.width = pct + '%';
+}
+
+async function loadHistory() {
+  const r = await api('/api/history');
+  const tb = $('#hisBody');
+  tb.innerHTML = '';
+  if (!r.ok || !r.list) return;
+  r.list.slice(0, 12).forEach(it => {
+    const tr = el('tr');
+    const ok = it.status == 1;
+    tr.innerHTML = `<td class="n">${(it.start_time||'').slice(5,16)}</td>
+      <td>${((it.mileage||0)/1000).toFixed(2)} km</td>
+      <td class="n">${fmt(it.running_time||0)}</td>
+      <td style="text-align:right"><span class="pill ${ok?'ok':'no'}">${ok?'合格':'无效'}</span></td>`;
+    tb.appendChild(tr);
+  });
+  if (!tb.children.length) tb.innerHTML = '<tr><td colspan="4" style="color:#4b5563">暂无记录</td></tr>';
+}
+
+document.querySelectorAll('.preset').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.preset').forEach(x => x.classList.toggle('on', x === b));
+    MILEAGE = +b.dataset.m;
+  };
+});
+
+$('#btnRun').onclick = async () => {
+  $('#btnRun').disabled = true;
+  const r = await api('/api/run/start', { mileage: MILEAGE, wait: Math.round(MILEAGE / 1000 * 200) });
+  if (!r.ok) { $('#btnRun').disabled = false; $('#phaseText').textContent = r.error || '启动失败'; }
+};
+
+const PHASE_CN = { idle:'就绪', create:'创建记录', wait:'跑步中', submit:'提交记录', upload:'上传轨迹', done:'完成', error:'失败' };
+
+async function poll() {
+  const r = await api('/api/run/status');
+  if (!r.ok || !ME) return;
+  const s = r.state;
+  const pct = s.total ? Math.min(100, s.elapsed / s.total * 100) : 0;
+  $('#ring').style.setProperty('--p', pct.toFixed(1));
+  $('#rTime').textContent = fmt(s.elapsed || 0);
+  $('#rTotal').textContent = '/ ' + fmt(s.total || 0);
+
+  const tag = $('#phaseTag');
+  tag.textContent = PHASE_CN[s.phase] || s.phase;
+  tag.className = 'tag' + (s.phase === 'error' ? ' err' : '');
+
+  $('#btnRun').disabled = s.running;
+  $('#btnRun').textContent = s.running ? '进行中…' : '开始跑步';
+
+  const log = $('#log');
+  const txt = (s.log || []).join('\n');
+  if (log.textContent !== txt) { log.textContent = txt; log.scrollTop = log.scrollHeight; }
+
+  if (s.result && s.result.id !== LAST_RESULT) {
+    LAST_RESULT = s.result.id;
+    $('#phaseText').innerHTML =
+      `完成 ${s.result.mileage/1000} km · ${fmt(s.result.running_time)} · 配速 ${s.result.pace}s/km<br>` +
+      `<span style="color:var(--accent)">${s.result.warning || ''}</span>`;
+    loadHistory();
+    const me = await api('/api/refresh', {});
+    if (me.ok && me.user) { ME = me.user; renderUser(); }
+  } else if (s.error) {
+    $('#phaseText').textContent = s.error;
+  } else if (!s.running) {
+    $('#phaseText').textContent = '选择里程后开始，服务端按真实耗时校验，等待期间不要关闭页面。';
+  }
+}
+
+function prefillPhone() {
+  try {
+    const p = localStorage.getItem(LS_PHONE);
+    if (p && !$('#phone').value) $('#phone').value = p;
+  } catch (e) {}
+}
+
+function setupShutdown() {
+  const b = $('#btnShutdown');
+  b.classList.remove('hidden');
+  b.onclick = async () => {
+    if (!confirm('关闭本地服务？页面随即断开。')) return;
+    b.disabled = true; b.textContent = '正在关闭…';
+    try {
+      await fetch('/api/shutdown', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+    } catch (e) { /* 服务已退出，连接被切是预期结果 */ }
+    document.querySelector('.wrap').innerHTML =
+      '<div style="text-align:center;padding:80px 20px;color:#8b96a8;line-height:2">' +
+      '服务已关闭<br><span style="font-size:12px">可以关掉这个标签页了</span></div>';
+  };
+}
+
+// ---------- 启动 ----------
+(async () => {
+  prefillPhone();
+  const s = await api('/api/session');
+  if (s.ok && s.frozen) setupShutdown();
+  if (s.ok && s.active && s.user) {
+    enter(s.user);
+    return;
+  }
+  prefillPhone();
+  if (s.ok && s.expired) {
+    setMsg('缓存的登录已过期，请重新登录', 'warn');
+  } else if (s.ok && s.restore_error) {
+    setMsg(s.restore_error, 'warn');
+  }
+})();
+</script>
+</body>
+</html>

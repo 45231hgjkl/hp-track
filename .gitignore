@@ -1,0 +1,73 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---------- PyInstaller / 构建产物 ----------
+.build/
+build/
+dist/
+*.spec.bak
+*.manifest
+*.toc
+
+# ---------- 运行期数据 / 登录态 / 抓包（含凭据，禁止入库） ----------
+session.json
+*.session
+mc.db
+*.db
+*.sqlite
+*.sqlite3
+capture.jsonl
+capture_raw.flow
+*.flow
+*.har
+*.pcap
+*.pcapng
+*.mitmproxy
+*.dump
+*.bin
+
+# ---------- 日志 / 临时文件 ----------
+*.log
+logs/
+w.out.log
+w.err.log
+web.out.log
+web.err.log
+_t.0
+u.0
+tmp/
+temp/
+*.tmp
+
+# ---------- 设备/注入二进制（体积大，按需自行下载） ----------
+frida-server*
+*.xz
+*.so
+*.dex
+
+# ---------- 逆向产物（由微信小程序包解出，不入库） ----------
+unpacked/
+
+# ---------- 证书 / 密钥 ----------
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

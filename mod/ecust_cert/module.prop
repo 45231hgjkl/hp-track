@@ -1,0 +1,6 @@
+id=ecust_cert
+name=Campus Run CA Inject
+version=v1.0
+versionCode=1
+author=local
+description=Inject Reqable+mitmproxy CA into system trust store for app debugging
