@@ -18,6 +18,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# CI/控制台可能是 cp1252/GBK：强制 Python 以 UTF-8 输出中文
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 

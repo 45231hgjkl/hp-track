@@ -14,6 +14,10 @@ import os
 import subprocess
 import sys
 
+try:                      # Windows 控制台/CI 默认非 UTF-8，中文输出会炸
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402
 

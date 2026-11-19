@@ -7,6 +7,7 @@
 #
 # 需要 gradle 9.3.1+（CI 用 gradle/actions/setup-gradle，本地可 export PATH 指过去）
 set -euo pipefail
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

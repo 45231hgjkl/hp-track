@@ -13,6 +13,8 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   lint-and-test:
@@ -98,11 +100,8 @@ jobs:
           java-version: "21"
 
       - uses: android-actions/setup-android@v3
-
-      - name: 安装 SDK 组件
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
 
       - uses: gradle/actions/setup-gradle@v4
         with:

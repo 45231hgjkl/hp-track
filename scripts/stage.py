@@ -13,6 +13,11 @@ import os
 import shutil
 import sys
 
+try:                      # Windows 控制台/CI 默认非 UTF-8，中文输出会炸
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 RUNTIME = ["ecust.py", "ecust_web.py", "pure_aes.py", "index.html"]
