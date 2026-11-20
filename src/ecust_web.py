@@ -161,7 +161,8 @@ def rlog(msg: str):
 
 
 # ---------------- 后台跑步任务 ----------------
-def run_job(mileage: int, wait: int, force: bool = False, accept_invalid: bool = False):
+def run_job(mileage: int, wait: int, force: bool = False, accept_invalid: bool = False,
+            strict_area: bool = False, skip_area: bool = False):
     """跑一次记录。每次网络副作用之前先把状态写进 run_state.json。
 
     状态和恢复策略：
@@ -192,6 +193,16 @@ def run_job(mileage: int, wait: int, force: bool = False, accept_invalid: bool =
         except ValueError as e:
             raise RuntimeError(str(e)) from e
         rlog("点位 " + " / ".join(p["point_name"] for p in points))
+
+        if not skip_area:
+            inside, total, outside = core.check_area(points, origin)
+            if inside < total:
+                msg = f"{total - inside}/{total} 个点位不在已知校区边界内（{'、'.join(outside)}）"
+                if strict_area:
+                    raise RuntimeError(msg + "；已知边界只覆盖奉贤校区，换校区请关掉边界检查")
+                rlog(f"提示：{msg}")
+            else:
+                rlog(f"点位校验 {inside}/{total} 在奉贤校区边界内")
 
         steps, pace, notes = core.plan_metrics(profile, mileage, wait)
         if notes:
@@ -628,7 +639,10 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         accept_invalid = bool(b.get("accept_invalid"))
-        threading.Thread(target=run_job, args=(mileage, wait, force, accept_invalid),
+        strict_area = bool(b.get("strict_area"))
+        skip_area = bool(b.get("no_area"))
+        threading.Thread(target=run_job,
+                         args=(mileage, wait, force, accept_invalid, strict_area, skip_area),
                          daemon=True).start()
         self._json({"ok": True, "mileage": mileage, "wait": wait,
                     "steps": steps, "pace": pace, "forced": force})

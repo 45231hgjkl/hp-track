@@ -6,6 +6,7 @@
 
     python selftest_login.py
 """
+import itertools
 import json
 import os
 import sys
@@ -291,6 +292,36 @@ def main():
         Fake.check_status = 1
         Fake.check_message = ""
         core.clear_run_state()
+
+        print("\n[15] 轨迹：顺序择优 / 速度曲线 / 校区边界")
+        pts15 = RANDRUN["data"]
+        org15 = {"lat": RANDRUN["lat"], "lng": RANDRUN["lng"]}
+        per, order, ring = core.best_ring(pts15, org15)
+        all_per = sorted(core.ring_length(core.ring_from(pts15, org15, o))
+                         for o in itertools.permutations(range(3)))
+        check("选中最短闭环", abs(per - all_per[0]) < 1e-9, (round(per, 2), round(all_per[0], 2)))
+        check("闭环首尾都是起点", ring[0] == ring[-1], (ring[0], ring[-1]))
+        check("六个顺序都算过", len(all_per) == 6, len(all_per))
+
+        track = core.make_track(pts15, org15, 2000, 300, sigma=0.0, seed=7)
+        check("每秒一个采样点", len(track) == 300, len(track))
+        check("时间偏移连续", [t[3] for t in track] == list(range(300)), track[:2])
+        steps_m = [core.hav(track[i][:2], track[i + 1][:2]) for i in range(len(track) - 1)]
+        avg = sum(steps_m) / len(steps_m)
+        cv = (sum((x - avg) ** 2 for x in steps_m) / len(steps_m)) ** 0.5 / avg
+        check("位移非常速（速度曲线生效）", cv > 0.01, round(cv, 4))
+        total_len = sum(steps_m)
+        check("轨迹总长接近目标里程", abs(total_len - 2000) / 2000 < 0.02, round(total_len, 1))
+
+        inside, total, outside = core.check_area(pts15, org15)
+        check("校区内点位全通过", inside == total == 4, (inside, total, outside))
+        out_pt = [{"lat": 31.2397, "lng": 121.4998, "point_name": "外滩"}]
+        inside2, total2, outside2 = core.check_area(out_pt, {"lat": 31.2397, "lng": 121.4998})
+        check("校外点位被识别", inside2 == 0 and "外滩" in outside2, (inside2, total2, outside2))
+        check("GCJ 偏移方向合理",
+              core.wgs_to_gcj(30.833463, 121.4919501)[0] < 30.833463
+              and core.wgs_to_gcj(30.833463, 121.4919501)[1] > 121.4919501,
+              core.wgs_to_gcj(30.833463, 121.4919501))
 
         print("\n[8] 退出清理")
         s, j = req(base, "/api/logout", {"purge": True})

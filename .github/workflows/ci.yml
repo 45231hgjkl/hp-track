@@ -36,7 +36,7 @@ jobs:
       - name: 字节码编译（src + scripts）
         run: python -m compileall -q src scripts
 
-      - name: 登录链路离线自测（63 项，不联网）
+      - name: 登录链路离线自测（73 项，不联网）
         run: python tests/selftest_login.py
 
       - name: 安卓入口桌面模拟

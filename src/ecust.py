@@ -32,6 +32,7 @@
 import argparse
 import datetime
 import getpass
+import itertools
 import json
 import math
 import os
@@ -98,6 +99,16 @@ FREQ_FALLBACK = 172.0
 # Header 只放这些键；值是本地会话文件读回来的，必须过一遍净化。
 HEADER_KEYS = ("X-Session-ID", "Authorization")
 HEADER_VALUE_RE = re.compile(r"^[A-Za-z0-9._~+/=\-]{1,512}$")
+
+# 奉贤校区边界（WGS84，OSM way 304214471，ODbL 1.0）。仅用于「点位是否在校区内」的提示，
+# 换校区时改这里或直接关掉校验（CLI --no-area / WebUI strict_area=false）。
+CAMPUS_BOUNDARY = (
+    (30.833463, 121.4919501), (30.8335415, 121.4920781), (30.8336969, 121.4923639),
+    (30.8341438, 121.4922949), (30.8342605, 121.4923117), (30.8343413, 121.4923458),
+    (30.8344155, 121.4923854), (30.8384256, 121.5001315), (30.8391466, 121.5015652),
+    (30.8329235, 121.5073882), (30.8321253, 121.5060542), (30.8276723, 121.4976667),
+    (30.8278105, 121.4971228), (30.8314375, 121.4937366),
+)
 
 
 # ---------------- 加密 ----------------
@@ -443,6 +454,73 @@ def client_from_session() -> Ecust:
     return Ecust(s.get("sid"), s.get("uid"))
 
 
+# ---------------- 坐标系与校区 ----------------
+def wgs_to_gcj(lat: float, lng: float):
+    """WGS84 → GCJ-02 正算。接口点位是 GCJ-02，边界数据是 WGS84，比对前统一到一边。"""
+    if not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271):
+        return lat, lng
+    x, y = lng - 105.0, lat - 35.0
+    pi = math.pi
+    dlat = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * math.sqrt(abs(x))
+    dlat += (20.0 * math.sin(6.0 * x * pi) + 20.0 * math.sin(2.0 * x * pi)) * 2.0 / 3.0
+    dlat += (20.0 * math.sin(y * pi) + 40.0 * math.sin(y / 3.0 * pi)) * 2.0 / 3.0
+    dlat += (160.0 * math.sin(y / 12.0 * pi) + 320.0 * math.sin(y * pi / 30.0)) * 2.0 / 3.0
+    dlng = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * math.sqrt(abs(x))
+    dlng += (20.0 * math.sin(6.0 * x * pi) + 20.0 * math.sin(2.0 * x * pi)) * 2.0 / 3.0
+    dlng += (20.0 * math.sin(x * pi) + 40.0 * math.sin(x / 3.0 * pi)) * 2.0 / 3.0
+    dlng += (150.0 * math.sin(x / 12.0 * pi) + 300.0 * math.sin(x / 30.0 * pi)) * 2.0 / 3.0
+    rad = lat * pi / 180.0
+    magic = 1 - 0.00669342162296594323 * math.sin(rad) ** 2
+    sq = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((6378245.0 * (1 - 0.00669342162296594323)) / (magic * sq) * pi)
+    dlng = (dlng * 180.0) / (6378245.0 / sq * math.cos(rad) * pi)
+    return lat + dlat, lng + dlng
+
+
+def in_polygon(lat: float, lng: float, poly) -> bool:
+    """射线法。poly 为 [(lat, lng), ...]，首尾不必重复。"""
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        y1, x1 = poly[i]
+        y2, x2 = poly[j]
+        if (y1 > lat) != (y2 > lat) and lng < (x2 - x1) * (lat - y1) / (y2 - y1) + x1:
+            inside = not inside
+        j = i
+    return inside
+
+
+_CAMPUS_GCJ = None
+
+
+def campus_polygon_gcj():
+    """边界常量是 WGS84，转成 GCJ-02 缓存一份供比对。"""
+    global _CAMPUS_GCJ
+    if _CAMPUS_GCJ is None:
+        _CAMPUS_GCJ = tuple(wgs_to_gcj(lat, lng) for lat, lng in CAMPUS_BOUNDARY)
+    return _CAMPUS_GCJ
+
+
+def check_area(points, origin):
+    """点位与起点是否落在已知校区边界内。返回 (inside_count, total, outside_names)。"""
+    poly = campus_polygon_gcj()
+    outside = []
+    total = 1
+    inside = 0
+    pairs = [("起点", origin)] + [(p.get("point_name") or "考核点", p) for p in points]
+    total = len(pairs)
+    for name, item in pairs:
+        lat, lng = _num(item.get("lat")), _num(item.get("lng"))
+        if lat is None or lng is None:
+            outside.append(name)
+            continue
+        if in_polygon(lat, lng, poly):
+            inside += 1
+        else:
+            outside.append(name)
+    return inside, total, outside
+
+
 # ---------------- 轨迹 ----------------
 def hav(a, b):
     lon1, lat1, lon2, lat2 = map(math.radians, (a[1], a[0], b[1], b[0]))
@@ -450,25 +528,52 @@ def hav(a, b):
     return 2 * R * math.asin(math.sqrt(h))
 
 
-def ring_from(points, origin):
-    """把「起点 + 三点」拼成闭环折线，首尾都是起点。"""
+def ring_from(points, origin, order=None):
+    """把「起点 + 三点 + 回起点」拼成闭环折线。order 决定三点的访问顺序。"""
+    idx = list(order) if order is not None else list(range(len(points)))
     ring = [(float(origin["lat"]), float(origin["lng"]))]
-    ring += [(float(p["lat"]), float(p["lng"])) for p in points]
+    ring += [(float(points[i]["lat"]), float(points[i]["lng"])) for i in idx]
     ring.append(ring[0])
     return ring
 
 
-def make_track(points, origin, total_m, seconds, sigma=1.2e-5):
-    """沿闭环折线铺满 total_m 里程，每秒取一个采样点。
+def ring_length(ring):
+    return sum(hav(a, b) for a, b in zip(ring, ring[1:]))
 
-    返回 [(lat, lng, accuracy, offset_seconds), ...]。offset 是相对起跑的秒数，
-    上传时用它算 timestamp —— 采样密度由这里决定，调用方不再假设「每秒一点」。
 
-    点位来自 randrunInfo，本函数只负责「怎么把这三个点跑完」。
+def best_ring(points, origin):
+    """三种点位的 6 种访问顺序里选闭环最短的一条。
+
+    只影响怎么跑，不改变提交给服务端的 pass_point 数组 —— 顺序和点位本身
+    都是服务端给的，本地只负责「用最少的绕路把这三个点串起来」。
     """
     if not points:
         raise ValueError("缺少考核点位")
-    ring = ring_from(points, origin)
+    best = None
+    for order in itertools.permutations(range(len(points))):
+        ring = ring_from(points, origin, order)
+        length = ring_length(ring)
+        if length <= 0:
+            continue
+        if best is None or length < best[0]:
+            best = (length, order, ring)
+    if best is None:
+        raise ValueError("点位重合，无法生成轨迹")
+    return best
+
+
+def make_track(points, origin, total_m, seconds, sigma=1.2e-5, seed=None):
+    """沿最短闭环铺满 total_m 里程，按速度曲线分配每秒的位置。
+
+    返回 [(lat, lng, accuracy, offset_seconds), ...]。offset 是相对起跑的秒数，
+    上传时用它算 timestamp。
+
+    与匀速版的区别：位置按 v(s) = 1 + 0.08·sin(s/90+φ) + 0.04·cos(s/210+φ)
+    推进，所以每秒位移不均匀（有快慢起伏），而不是「每秒走固定米数」。
+    """
+    if not points:
+        raise ValueError("缺少考核点位")
+    _, _, ring = best_ring(points, origin)
     seg = [hav(a, b) for a, b in zip(ring, ring[1:])]
     per = sum(seg)
     if per <= 0:
@@ -476,27 +581,46 @@ def make_track(points, origin, total_m, seconds, sigma=1.2e-5):
 
     total_m = max(float(total_m), 1.0)
     seconds = max(1, int(seconds))
-    count = max(2, int(total_m / 0.5) + 1)
-    dense = []
+    rng = random.Random(seed)
+    phase = rng.random() * 2 * math.pi
+
+    step_m = 0.5
+    count = max(2, int(total_m / step_m) + 1)
+    ds = total_m / (count - 1)
+    pts, weights = [], [0.0]
     for k in range(count):
-        s = total_m * k / (count - 1)
+        s = ds * k
         d, acc = s % per, 0.0
         for i, seg_len in enumerate(seg):
             if d <= acc + seg_len or i == len(seg) - 1:
                 f = (d - acc) / seg_len if seg_len > 0 else 0.0
                 f = min(1.0, max(0.0, f))
                 a, b = ring[i], ring[i + 1]
-                dense.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+                pts.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
                 break
             acc += seg_len
+        if k:
+            speed = 1.0 + 0.08 * math.sin(s / 90.0 + phase) + 0.04 * math.cos(s / 210.0 + phase)
+            weights.append(weights[-1] + ds / max(speed, 0.5))
 
-    rng = random.Random()
+    span = weights[-1] or 1.0
+    weights = [w / span for w in weights]      # 相对时间轴 0..1
+    n = len(pts)
+    denom = max(1, seconds - 1)
     out = []
-    for i in range(seconds):
-        lat, lng = dense[int(i * (len(dense) - 1) / max(1, seconds - 1))]
+    j = 0
+    for sec in range(seconds):
+        target = sec / denom
+        while j < n - 2 and weights[j + 1] < target:
+            j += 1
+        t0, t1 = weights[j], weights[j + 1]
+        f = 0.0 if t1 <= t0 else (target - t0) / (t1 - t0)
+        f = min(1.0, max(0.0, f))
+        lat = pts[j][0] + (pts[j + 1][0] - pts[j][0]) * f
+        lng = pts[j][1] + (pts[j + 1][1] - pts[j][1]) * f
         out.append((round(lat + rng.gauss(0, sigma), 6),
                     round(lng + rng.gauss(0, sigma), 6),
-                    5.0, i))
+                    5.0, sec))
     return out
 
 
@@ -585,6 +709,17 @@ def cmd_run(a):
     except ValueError as e:
         sys.exit(f"{e}（未到开放时段或会话已过期）")
     print("点位:", " / ".join(p["point_name"] for p in points))
+
+    if not a.no_area:
+        inside, total, outside = check_area(points, origin)
+        where = "在奉贤校区边界内" if inside == total else "不在已知校区边界内"
+        if inside < total:
+            msg = f"{total - inside}/{total} 个点位{where}（{'、'.join(outside)}）"
+            if a.strict_area:
+                sys.exit(f"{msg}；已知边界只覆盖奉贤校区，换校区请加 --no-area")
+            print(f"提示：{msg}；可能不是奉贤校区，继续按服务端点位跑（--no-area 可关掉检查）")
+        else:
+            print(f"点位校验：{inside}/{total} 在奉贤校区边界内")
 
     mileage = max(2000, int(a.mileage))
     wait = int(a.wait) if a.wait > 0 else plan_wait(profile, mileage)
@@ -727,6 +862,8 @@ def main():
     rp.add_argument("--wait", type=int, default=0, help="时长秒；0 表示按服务端配速区间自动推算")
     rp.add_argument("--force", action="store_true", help="忽略未收尾的本地记录（会在服务器上多建一条）")
     rp.add_argument("--accept-invalid", action="store_true", help="接受服务端明确判不合格的结果，继续提交")
+    rp.add_argument("--strict-area", action="store_true", help="点位不在已知校区边界内就中止")
+    rp.add_argument("--no-area", action="store_true", help="跳过校区边界检查（换校区时用）")
     rp.set_defaults(func=cmd_run)
 
     sub.add_parser("abandon", help="停止跟踪未收尾的记录（不删除服务器上的记录）").set_defaults(func=cmd_abandon)
