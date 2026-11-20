@@ -43,6 +43,9 @@ class Fake:
     calls = []
     bodies = {}
     points = None
+    fail_create = False
+    check_status = 1
+    check_message = ""
 
     def __init__(self, sid=None, uid=None):
         self.sid, self.uid = sid, uid
@@ -94,13 +97,16 @@ class Fake:
     def create_line(self, points):
         Fake.points = points
         Fake.calls.append(("createLine", len(points)))
+        if Fake.fail_create:
+            raise RuntimeError("fixture createLine failed")
         return 987654
 
     def post(self, path, body=None):
         Fake.calls.append(("post", path))
         Fake.bodies[path] = body
         if path == "/xcxapi/checkRecord/":
-            return {"code": 1, "data": {"status": 1}}
+            return {"code": 1, "data": {"status": Fake.check_status,
+                                        "message": Fake.check_message}}
         return {"code": 1}
 
     def record_info(self, rid):
@@ -124,10 +130,12 @@ def main():
     core.Ecust = Fake
     W.core.Ecust = Fake
     W.SMS_COOLDOWN = 2
-    # 不读写真实 session.json
+    # 不读写真实 session.json / run_state.json
     core.SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest_session.json")
-    if os.path.exists(core.SESSION_FILE):
-        os.remove(core.SESSION_FILE)
+    core.RUN_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest_run_state.json")
+    for path in (core.SESSION_FILE, core.RUN_STATE_FILE, core.RUN_STATE_FILE + ".tmp"):
+        if os.path.exists(path):
+            os.remove(path)
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), W.Handler)
     port = srv.server_port
@@ -238,6 +246,52 @@ def main():
         W.STATE["user"].pop("min_pace", None)
         W.STATE["user"].pop("max_pace", None)
 
+        print("\n[12] 状态机：创建结果未知时不重复建")
+        core.clear_run_state()
+        Fake.calls.clear()
+        Fake.fail_create = True
+        W.run_job(2000, 2)
+        st12 = core.load_run_state()
+        check("createLine 失败 → create_unknown", st12.get("status") == "create_unknown", st12)
+        check("被判为未收尾", core.run_unresolved(st12) is True, st12.get("status"))
+        check("未拿到 record_id", st12.get("record_id") is None, st12.get("record_id"))
+        s, j = req(base, "/api/run/start", {"mileage": 2000, "wait": 400})
+        check("再次启动被拦", j.get("ok") is False and j.get("unresolved") is True, j)
+        check("拦截信息带状态", j.get("status") == "create_unknown", j)
+        Fake.fail_create = False
+        s, j = req(base, "/api/run/resolve", {})
+        check("resolve 清掉未收尾", j.get("ok") is True and j.get("cleared") is True, j)
+        check("清掉后可重新开跑", core.run_unresolved(core.load_run_state()) is False)
+
+        print("\n[13] checkRecord 判不合格时不再提交")
+        core.clear_run_state()
+        Fake.calls.clear()
+        Fake.check_status = 0
+        W.run_job(2000, 2)
+        st13 = core.load_run_state()
+        check("status=0 → check_failed", st13.get("status") == "check_failed", st13)
+        check("未发 updateRecordNew",
+              ("post", "/xcxapi/updateRecordNew/") not in Fake.calls, Fake.calls[-4:])
+        check("未上传轨迹",
+              ("post", "/xcxapi/uploadPathPointV3/") not in Fake.calls, Fake.calls[-4:])
+        Fake.check_status = 1
+
+        print("\n[14] 日志脱敏（服务端回显也不外泄）")
+        core.clear_run_state()
+        Fake.check_status = 0
+        Fake.check_message = f"失败 {PHONE} sid=SID-abcdefghijklmnopqrstuvwxyz012345"
+        W.run_job(2000, 2)
+        log = "\n".join(W.STATE["run"]["log"])
+        check("redact 打码手机号", "155****0181" in core.redact(f"phone={PHONE}"), core.redact(f"phone={PHONE}"))
+        check("redact 抹掉长 token", "<redacted>" in core.redact("sid=abcdefghijklmnopqrstuvwx1234"))
+        check("日志不含原始手机号", PHONE not in log, log[-300:])
+        check("日志不含原始 sid", "SID-abcdefghijklmnopqrstuvwxyz012345" not in log, log[-300:])
+        err = W.STATE["run"].get("error") or ""
+        check("失败原因也不含原始串", PHONE not in err and "SID-abcdefghijklmnopqrstuvwxyz012345" not in err, err)
+        Fake.check_status = 1
+        Fake.check_message = ""
+        core.clear_run_state()
+
         print("\n[8] 退出清理")
         s, j = req(base, "/api/logout", {"purge": True})
         check("logout ok", j.get("ok") is True and j.get("purged") is True, j)
@@ -246,8 +300,9 @@ def main():
         check("退出后 me 为空", j.get("ok") is False, j)
     finally:
         srv.shutdown()
-        if os.path.exists(core.SESSION_FILE):
-            os.remove(core.SESSION_FILE)
+        for path in (core.SESSION_FILE, core.RUN_STATE_FILE, core.RUN_STATE_FILE + ".tmp"):
+            if os.path.exists(path):
+                os.remove(path)
 
     print(f"\n{'='*46}\nPASS {len(PASSED)}  FAIL {len(FAILED)}")
     for f in FAILED:

@@ -155,22 +155,35 @@ def require_login() -> core.Ecust:
 def rlog(msg: str):
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     with LOCK:
-        STATE["run"]["log"].append(f"{ts}  {msg}")
+        STATE["run"]["log"].append(f"{ts}  {core.redact(msg)}")
         if len(STATE["run"]["log"]) > 300:
             STATE["run"]["log"] = STATE["run"]["log"][-300:]
 
 
 # ---------------- 后台跑步任务 ----------------
-def run_job(mileage: int, wait: int):
+def run_job(mileage: int, wait: int, force: bool = False, accept_invalid: bool = False):
+    """跑一次记录。每次网络副作用之前先把状态写进 run_state.json。
+
+    状态和恢复策略：
+      create_pending 未拿到 record_id ⇒ 可以重新准备（请求没发出去的证据）
+      create_unknown / finish_unknown ⇒ 结果不确定，绝不自动重试
+    """
     st = STATE["run"]
     with LOCK:
         st.update(running=True, phase="create", elapsed=0, total=wait,
                   mileage=mileage, record_id=None, log=[], result=None, error=None)
+    state = {}
     try:
         c = STATE["cli"]
         if c is None:
             raise SessionExpired("未登录")
         profile = STATE["user"] or {}
+
+        prev = core.load_run_state()
+        if core.run_unresolved(prev) and not force:
+            raise RuntimeError(
+                f"上次记录未收尾（{prev.get('status')} / record_id={prev.get('record_id')}），"
+                "先到小程序核实，再点「已核实」或加 force 重跑")
 
         rlog("获取本次考核点位…")
         try:
@@ -185,10 +198,32 @@ def run_job(mileage: int, wait: int):
             raise RuntimeError("；".join(notes))
         rlog(f"指标 {mileage}m / {wait}s / {steps} 步 / {pace} min/km")
 
+        t0 = time.time()
+        start = datetime.datetime.fromtimestamp(t0)
+        state = {"slot": core.slot_of(start), "mileage": mileage, "wait": wait,
+                 "steps": steps, "pace": pace,
+                 "start_time": start.isoformat(timespec="seconds"),
+                 "points": [p["point_name"] for p in points],
+                 "record_id": None, "status": "create_pending"}
+        core.save_run_state(state)
+
         rlog("创建跑步记录…")
-        rid = secure(c.create_line, points)
+        try:
+            rid = secure(c.create_line, points)
+        except SessionExpired:
+            state.update(status="create_unknown", error="会话失效，创建结果未知")
+            core.save_run_state(state)
+            raise
+        except Exception as e:  # noqa: BLE001
+            state.update(status="create_unknown", error=type(e).__name__)
+            core.save_run_state(state)
+            raise RuntimeError(f"createLine 未完成：{e}") from e
         if not rid:
-            raise RuntimeError("createLine 失败，会话可能已过期")
+            state.update(status="create_unknown", error="createLine 未返回 record_id")
+            core.save_run_state(state)
+            raise RuntimeError("createLine 未返回 record_id，已标记 create_unknown")
+        state.update(status="created", record_id=rid)
+        core.save_run_state(state)
         with LOCK:
             st["record_id"] = rid
         rlog(f"record_id = {rid}")
@@ -196,7 +231,6 @@ def run_job(mileage: int, wait: int):
         track = core.make_track(points, origin, mileage, wait)
         rlog(f"生成轨迹 {len(track)} 点 / {mileage}m / {wait}s")
 
-        t0 = time.time()
         with LOCK:
             st["phase"] = "wait"
         while True:
@@ -211,21 +245,50 @@ def run_job(mileage: int, wait: int):
             st["phase"] = "submit"
         rlog("提交记录…")
         now = datetime.datetime.now()
-        start = datetime.datetime.fromtimestamp(t0)
         body = {"record_id": rid, "pace": pace,
                 "running_time": wait, "mileage": mileage,
                 "start_time": (start + datetime.timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
                 "end_time": now.strftime("%Y-%m-%d %H:%M:%S"),
                 "pass_point": len(points), "step_count": steps}
 
-        ck = secure(c.post, "/xcxapi/checkRecord/", {"a": core.enc(body)})
-        ok = (ck.get("data") or {}).get("status") == 1
-        rlog(f"checkRecord → {'合格' if ok else (ck.get('data') or {}).get('message') or ck.get('message')}")
-        if not ok:
-            raise RuntimeError((ck.get("data") or {}).get("message") or "服务端预校验未通过")
+        state["status"] = "checking"
+        core.save_run_state(state)
+        try:
+            ck = secure(c.post, "/xcxapi/checkRecord/", {"a": core.enc(body)})
+        except SessionExpired:
+            # 会话失效不等于记录有问题：退回 created，重新登录后还能再提
+            state.update(status="created", error="会话失效，可重新登录后重提")
+            core.save_run_state(state)
+            raise
+        kind, reason, _ = core.check_verdict(ck)
+        if kind == "unknown":
+            state.update(status="check_failed", reason=reason)
+            core.save_run_state(state)
+            raise RuntimeError(f"校验状态无法识别：{reason}")
+        if kind == "invalid":
+            if not accept_invalid:
+                state.update(status="check_failed", reason=reason)
+                core.save_run_state(state)
+                raise RuntimeError(f"服务端预校验不通过：{reason}")
+            rlog(f"服务端判为不合格（{reason}），按确认继续提交")
+        else:
+            rlog("checkRecord → 合格")
 
-        up = secure(c.post, "/xcxapi/updateRecordNew/", {"a": core.enc(body)})
+        state["status"] = "finish_pending"
+        core.save_run_state(state)
+        try:
+            up = secure(c.post, "/xcxapi/updateRecordNew/", {"a": core.enc(body)})
+        except BaseException as e:
+            state.update(status="finish_unknown", error=f"updateRecordNew 未完成：{type(e).__name__}")
+            core.save_run_state(state)
+            raise
         rlog(f"updateRecordNew → code={up.get('code')}")
+        if up.get("code") != 1:
+            state.update(status="finish_unknown", error=str(up.get("message") or "")[:200])
+            core.save_run_state(state)
+            raise RuntimeError(f"updateRecordNew 未返回成功：{up.get('message') or '未知'}")
+        state["status"] = "record_updated"
+        core.save_run_state(state)
 
         with LOCK:
             st["phase"] = "upload"
@@ -235,15 +298,28 @@ def run_job(mileage: int, wait: int):
             batch = [{"name": "", "lat": lat, "lng": lng, "accuracy": acc,
                       "timestamp": int((start + datetime.timedelta(seconds=off)).timestamp() * 1000)}
                      for (lat, lng, acc, off) in track[i:i + 50]]
-            r = secure(c.post, "/xcxapi/uploadPathPointV3/",
-                       {"img_url": core.enc({"record_id": rid, "path_point": batch, "path_image": ""})})
+            try:
+                r = secure(c.post, "/xcxapi/uploadPathPointV3/",
+                           {"img_url": core.enc({"record_id": rid, "path_point": batch, "path_image": ""})})
+            except BaseException as e:
+                state.update(status="finish_unknown", error=f"轨迹上传中断：{type(e).__name__}",
+                             uploaded_points=min(i, len(track)))
+                core.save_run_state(state)
+                raise
             if r.get("code") != 1:
+                state.update(status="finish_unknown", error="轨迹上传被拒",
+                             uploaded_points=min(i, len(track)))
+                core.save_run_state(state)
                 raise RuntimeError(f"轨迹上传失败: {r.get('message')}")
             done += 1
+            state["uploaded_points"] = min(i + 50, len(track))
+            core.save_run_state(state)
             rlog(f"轨迹批次 {done}/{total_b}")
 
         info = secure(c.record_info, rid).get("data", {})
         rlog(f"完成  status={info.get('status')}  {info.get('warning') or ''}")
+        state.update(status="finished", uploaded_points=len(track))
+        core.save_run_state(state)
         with LOCK:
             st["result"] = {k: info.get(k) for k in
                             ("id", "mileage", "running_time", "pace", "speed",
@@ -252,14 +328,15 @@ def run_job(mileage: int, wait: int):
     except SessionExpired as e:
         rlog(f"失败: {e}")
         with LOCK:
-            st["error"] = str(e)
+            st["error"] = core.redact(str(e))
             st["phase"] = "error"
     except Exception as e:  # noqa: BLE001
         rlog(f"失败: {e}")
         with LOCK:
-            st["error"] = str(e)
+            st["error"] = core.redact(str(e))
             st["phase"] = "error"
-        traceback.print_exc()
+        # 堆栈里可能带服务端回显的会话串，落 stderr 前先脱敏
+        print(core.redact(traceback.format_exc())[-2000:], file=sys.stderr)
     finally:
         with LOCK:
             st["running"] = False
@@ -334,6 +411,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._user_bundle())
             elif p == "/api/session":
                 cached = core.load_session()
+                rs = core.load_run_state()
                 self._json({
                     "ok": True,
                     "active": STATE["user"] is not None,
@@ -346,6 +424,13 @@ class Handler(BaseHTTPRequestHandler):
                         "name": cached.get("name"),
                         "saved_at": cached.get("saved_at"),
                     } if cached.get("sid") else None),
+                    "run_state": ({
+                        "status": rs.get("status"),
+                        "record_id": rs.get("record_id"),
+                        "slot": rs.get("slot"),
+                        "uploaded_points": rs.get("uploaded_points"),
+                        "unresolved": core.run_unresolved(rs),
+                    } if rs else None),
                     "user": STATE["user"],
                 })
             elif p == "/api/history":
@@ -363,7 +448,14 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     st = dict(STATE["run"])
                     st["log"] = list(st["log"])[-120:]
-                self._json({"ok": True, "state": st})
+                rs = core.load_run_state()
+                self._json({"ok": True, "state": st, "run_state": ({
+                    "status": rs.get("status"),
+                    "record_id": rs.get("record_id"),
+                    "slot": rs.get("slot"),
+                    "uploaded_points": rs.get("uploaded_points"),
+                    "unresolved": core.run_unresolved(rs),
+                } if rs else None)})
             else:
                 self._json({"ok": False, "error": "not found"}, 404)
         except Exception as e:  # noqa: BLE001
@@ -386,6 +478,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._logout(b)
             elif p == "/api/run/start":
                 self._run_start(b)
+            elif p == "/api/run/resolve":
+                self._run_resolve(b)
             elif p == "/api/refresh":
                 try:
                     c = require_login()
@@ -523,8 +617,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "参数不合规：" + "；".join(notes),
                                "suggest": {"wait": core.plan_wait(profile, mileage)}})
 
-        threading.Thread(target=run_job, args=(mileage, wait), daemon=True).start()
-        self._json({"ok": True, "mileage": mileage, "wait": wait, "steps": steps, "pace": pace})
+        force = bool(b.get("force"))
+        prev = core.load_run_state()
+        if core.run_unresolved(prev) and not force:
+            return self._json({
+                "ok": False, "unresolved": True,
+                "status": prev.get("status"), "record_id": prev.get("record_id"),
+                "error": (f"上次记录未收尾（{prev.get('status')} / record_id={prev.get('record_id')}），"
+                          "先到小程序核实，再点「已核实」；直接重跑会在服务器上多建一条"),
+            })
+
+        accept_invalid = bool(b.get("accept_invalid"))
+        threading.Thread(target=run_job, args=(mileage, wait, force, accept_invalid),
+                         daemon=True).start()
+        self._json({"ok": True, "mileage": mileage, "wait": wait,
+                    "steps": steps, "pace": pace, "forced": force})
+
+    def _run_resolve(self, b: dict):
+        """把未收尾的本地记录标记为已核实：只动本地状态，不碰服务器记录。"""
+        with LOCK:
+            if STATE["run"]["running"]:
+                return self._json({"ok": False, "error": "任务进行中，先等它结束"})
+        state = core.load_run_state()
+        if not state:
+            return self._json({"ok": True, "cleared": False, "reason": "没有本地记录状态"})
+        if state.get("status") in core.RUN_TERMINAL:
+            return self._json({"ok": True, "cleared": False, "status": state.get("status")})
+        previous = state.get("status")
+        state.update(status="discarded", previous_status=previous,
+                     discarded_at=datetime.datetime.now().isoformat(timespec="seconds"))
+        core.save_run_state(state)
+        self._json({"ok": True, "cleared": True, "previous_status": previous,
+                    "record_id": state.get("record_id")})
 
 
 def _force_utf8_stdio():

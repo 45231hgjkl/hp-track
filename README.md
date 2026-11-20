@@ -4,6 +4,8 @@
 本地回环 `127.0.0.1:8737` 提供 Web 控制台，支持密码登录、短信登录与跑量提交。
 考核点位一律取服务端当次下发的三点，本地只负责把这三个点跑完；配速按分钟/公里、
 步数按步频推算，提交前用服务端给的上下限做一次预校验。
+每次创建/提交之前先把状态写进 `run_state.json`：上次记录没收尾时不再新建，避免在服务器上
+留下两条；确认后可以用 `ecust.py abandon`（或页面上的「已核实」）把本地状态收掉。
 
 [![CI](https://github.com/45231hgjkl/hp-track/actions/workflows/ci.yml/badge.svg)](https://github.com/45231hgjkl/hp-track/actions/workflows/ci.yml)
 
@@ -28,7 +30,7 @@ src/       运行时：ecust.py（API/鉴权/轨迹） ecust_web.py（本地服�
 android/   Chaquopy 工程：Java 壳 + 前台服务保活 + entry.py
 scripts/   构建与验收：build_windows.ps1 / build_pyz.py / build_apk.ps1|sh
            verify_artifacts.py / verify_apk.py / sim_entry.py / paths.py / manifest.py
-tests/     离线回归：selftest_login.py（48 项，不联网）
+tests/     离线回归：selftest_login.py（63 项，不联网）
 docs/      适配计划 ADAPTATION-PLAN.md、变更记录 CHANGELOG.md
 .github/   ci.yml（检查+三端构建）、release.yml（tag 发布）
 ```

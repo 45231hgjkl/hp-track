@@ -2,6 +2,37 @@
 
 版本号与根目录 `VERSION` 一致，tag 形如 `v1.0.0`。
 
+## [1.2.0] — 2026-11-20
+
+记录状态落盘 + 未收尾拦截。此前任务只活在进程内存里，进程一挂就既不知道自己有没有
+`createLine` 成功、也拿不到 `record_id`，重跑会在服务器上留下两条记录。
+
+### 变更
+
+- **新增 `run_state.json`**（与 `session.json` 同目录，原子写）：每次网络副作用之前先落盘，
+  状态机为 `create_pending → created → checking → finish_pending → record_updated → finished`，
+  异常落到 `create_unknown` / `finish_unknown` / `check_failed`。
+- **未收尾即拦截**：`create_pending` 之外的非终态记录一律拒绝新建，CLI 与 WebUI 同一条规则；
+  `create_unknown` / `finish_unknown` 明确不自动重试。
+- **`checkRecord` 三分支**：`status==1` 继续；`status==0` 中止并落 `check_failed`（CLI `--accept-invalid`
+  可覆盖，WebUI 传 `accept_invalid`）；结构无法识别时中止而不是猜。
+- **人工收尾通道**：CLI `ecust.py abandon`、`run --force`，WebUI `POST /api/run/resolve`
+  与页面上的「已核实，清掉」——只动本地状态，服务器记录原样保留。
+- **日志脱敏**：`rlog()` 与失败原因统一过 `redact()`，手机号打码、长 token（sid 形态）整段替换；
+  `stderr` 的堆栈也走同一层脱敏，避免用户分享日志时带出会话。
+- **`/api/session` 与 `/api/run/status`** 增加 `run_state` 摘要，页面顶部显示未收尾提示。
+
+### 新增
+
+- 离线自测 48 → 63 项：创建失败落 `create_unknown`、未收尾拦截、`resolve` 收尾后重跑、
+  `status=0` 不发 `updateRecordNew` 也不传轨迹、日志与失败原因不含手机号/sid。
+
+### 已知限制
+
+- `run_state.json` 只保留最近一次记录，不做多任务队列。
+- `create_pending` 状态下的重跑仍会新建记录；判断依据是「没有 record_id 就说明请求没发出去」，
+  若网络在响应返回前中断，服务端可能已建记录而本地仍是 `create_pending`。
+
 ## [1.1.0] — 2026-11-20
 
 对齐小程序侧的数据口径。此前的记录用本地硬编码点位与秒制配速提交，服务端按

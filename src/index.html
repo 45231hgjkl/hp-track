@@ -200,6 +200,11 @@ td.n{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
 
     <div class="card">
       <h2>自动校园跑</h2>
+      <div id="pendingBox" class="hidden"
+           style="margin:10px 0;padding:10px 12px;border-radius:10px;background:#2a2214;border:1px solid #6b5522;font-size:12px;line-height:1.65;color:#e2c07a">
+        <span id="pendingText"></span>
+        <button class="btn small ghost" id="btnResolve" type="button" style="margin-top:8px">已核实，清掉</button>
+      </div>
       <div class="presets" id="presets">
         <button class="preset on" data-m="2000"><b>2.0 km</b><span>达标线 · 约11分</span></button>
         <button class="preset" data-m="3000"><b>3.0 km</b><span>约17 分钟</span></button>
@@ -241,6 +246,7 @@ const LS_PHONE = 'hp_track_phone';
 
 let ME = null, MILEAGE = 2000, POLL = null, LAST_RESULT = null;
 let RELOGIN_DONE = false, TAB = 'pwd', PACE = 5.5;
+let RUN_STATE = null, PENDING_KEY = '';
 
 // ---------- HTTP ----------
 async function api(path, body) {
@@ -513,6 +519,36 @@ function refreshPlan() {
     + '点位由服务端下发，等待期间不要关闭页面。';
 }
 
+const RUN_STATUS_CN = {
+  create_pending: '创建中', create_unknown: '创建结果未知', created: '已创建待提交',
+  checking: '校验中', check_failed: '校验未通过', finish_pending: '提交中',
+  record_updated: '已提交待传轨迹', finish_unknown: '提交结果未知',
+  finished: '已完成', discarded: '已停止跟踪',
+};
+
+// 未收尾的记录一律拦住，避免在服务器上留下两条记录
+function renderPending() {
+  const rs = RUN_STATE;
+  const key = rs ? `${rs.status}|${rs.record_id || ''}|${rs.unresolved}` : '';
+  if (key === PENDING_KEY) return;
+  PENDING_KEY = key;
+  const box = $('#pendingBox');
+  if (!rs || !rs.unresolved) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  const id = rs.record_id ? ` · record_id=${rs.record_id}` : '';
+  const up = rs.uploaded_points ? ` · 已传 ${rs.uploaded_points} 点` : '';
+  $('#pendingText').textContent =
+    `上次记录未收尾：${RUN_STATUS_CN[rs.status] || rs.status}${id}${up}。`
+    + '先到小程序核实这条记录，再点下面按钮；直接重跑会在服务器上多建一条。';
+}
+
+$('#btnResolve').onclick = async () => {
+  const r = await api('/api/run/resolve', {});
+  if (!r.ok) { $('#pendingText').textContent = r.error || '操作失败'; return; }
+  await poll();
+  $('#phaseText').textContent = '已标记为已核实，可以重新开始。';
+};
+
 $('#btnRun').onclick = async () => {
   $('#btnRun').disabled = true;
   const r = await api('/api/run/start', { mileage: MILEAGE, wait: runSeconds() });
@@ -530,6 +566,8 @@ async function poll() {
   const r = await api('/api/run/status');
   if (!r.ok || !ME) return;
   const s = r.state;
+  RUN_STATE = r.run_state || null;
+  renderPending();
   const pct = s.total ? Math.min(100, s.elapsed / s.total * 100) : 0;
   $('#ring').style.setProperty('--p', pct.toFixed(1));
   $('#rTime').textContent = fmt(s.elapsed || 0);

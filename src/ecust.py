@@ -14,6 +14,11 @@
   预校验    shortest_distance / min_pace / max_pace / min_step_frequency /
             max_step_frequency 缺失即跳过该项，不臆造约束
 
+记录状态机（run_state.json，每次网络副作用前落盘）:
+  create_pending → created → checking → finish_pending → record_updated → finished
+  异常落到 create_unknown / finish_unknown / check_failed：这两种「不确定」不自动重试，
+  必须到小程序核实后跑 abandon 收尾，避免在服务器上留下两条记录。
+
 用法:
   python ecust.py login --phone 15583910181                 # 交互输入密码
   python ecust.py login --phone 15583910181 --password xxx
@@ -75,6 +80,12 @@ def data_dir() -> str:
 
 
 SESSION_FILE = os.path.join(data_dir(), "session.json")
+RUN_STATE_FILE = os.path.join(data_dir(), "run_state.json")
+
+# 记录状态机。终态之外都算「服务器上可能已经有这条记录」，不能随手新建。
+RUN_TERMINAL = ("finished", "discarded")
+RUN_UNRESOLVED = ("create_pending", "create_unknown", "created", "checking",
+                  "check_failed", "finish_pending", "record_updated", "finish_unknown")
 
 # randrunInfo 的查询坐标：只用来告诉服务端「我在奉贤校区」，不参与点位构造。
 # 考核点位一律以服务端当次返回的 data 为准（见 parse_randrun）。
@@ -340,6 +351,77 @@ def mask_phone(p) -> str:
     return s[:3] + "****" + s[-4:] if len(s) == 11 else s
 
 
+PHONE_TEXT_RE = re.compile(r"\b1[3-9]\d{9}\b")
+TOKEN_TEXT_RE = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
+
+
+def redact(text) -> str:
+    """日志脱敏：手机号打码，长 token（sid 形态）整段抹掉。
+
+    日志会被用户复制到聊天里求助，服务端返回体里可能带 session_key 回显。
+    """
+    s = PHONE_TEXT_RE.sub(lambda m: m.group(0)[:3] + "****" + m.group(0)[-4:], str(text))
+    return TOKEN_TEXT_RE.sub("<redacted>", s)
+
+
+# ---------------- 记录状态机 ----------------
+def slot_of(when=None) -> str:
+    """时间槽：精确到分钟，用来防止同一分钟重复创建记录。"""
+    return (when or datetime.datetime.now()).strftime("%Y-%m-%d %H:%M")
+
+
+def load_run_state() -> dict:
+    if os.path.exists(RUN_STATE_FILE):
+        try:
+            state = json.load(open(RUN_STATE_FILE, encoding="utf-8"))
+            if isinstance(state, dict):
+                return state
+        except Exception:
+            pass
+    return {}
+
+
+def save_run_state(state: dict):
+    """原子写：先写 .tmp 再 rename，进程被杀也不会留下半个 json。"""
+    tmp = RUN_STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, RUN_STATE_FILE)
+
+
+def clear_run_state():
+    for path in (RUN_STATE_FILE, RUN_STATE_FILE + ".tmp"):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def run_unresolved(state: dict) -> bool:
+    """还有没走完的记录？这类状态一律不许自动再建一条。"""
+    return bool(state) and state.get("status") in RUN_UNRESOLVED
+
+
+def check_verdict(ck) -> tuple:
+    """解析 checkRecord：返回 (kind, reason, data)。
+
+    kind: ok / invalid / unknown
+      ok      status==1，可以继续提交
+      invalid status==0，服务端明确判不合格
+      unknown 结构不认识，不能猜
+    """
+    data = (ck or {}).get("data") if isinstance(ck, dict) else None
+    status = data.get("status") if isinstance(data, dict) else None
+    reason = ""
+    if isinstance(ck, dict):
+        reason = str((data or {}).get("message") or ck.get("message") or "")[:200]
+    if status == 1:
+        return "ok", reason, data
+    if status == 0:
+        return "invalid", reason or "服务端判为不合格", data
+    return "unknown", reason or "校验状态无法识别", data
+
+
 def save_session(d: dict):
     with open(SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
@@ -466,7 +548,31 @@ def cmd_history(a):
               f"{float(it.get('mileage') or 0)/1000:>6.2f}km  {flag}")
 
 
+def cmd_abandon(a):
+    """把本地未收尾的记录标记为停止跟踪；服务器上的记录不会被动。"""
+    state = load_run_state()
+    if not state:
+        print("没有本地记录状态，无需处理")
+        return
+    if state.get("status") in RUN_TERMINAL:
+        print(f"本地状态已是 {state.get('status')}，无需处理")
+        return
+    state.update(status="discarded", previous_status=state.get("status"),
+                 discarded_at=datetime.datetime.now().isoformat(timespec="seconds"))
+    save_run_state(state)
+    print(f"已停止跟踪 record_id={state.get('record_id')}（原状态 {state['previous_status']}）")
+    print("服务器上的记录仍然存在，需要处理请到小程序里操作")
+
+
 def cmd_run(a):
+    prev = load_run_state()
+    if run_unresolved(prev) and not a.force:
+        sys.exit(f"上次记录未收尾：status={prev.get('status')} record_id={prev.get('record_id')} "
+                 f"slot={prev.get('slot')}。先到小程序核实；确认无需处理后再用 abandon 收尾，"
+                 f"或用 --force 强跑（会在服务器上多建一条）")
+    if run_unresolved(prev) and a.force:
+        print(f"警告：忽略未收尾记录 status={prev.get('status')} record_id={prev.get('record_id')}")
+
     c = client_from_session()
     info = c.userinfo()
     if info.get("code") != 1:
@@ -489,9 +595,24 @@ def cmd_run(a):
     print(f"指标 {mileage}m / {wait}s / {steps} 步 / 配速 {pace} min/km")
 
     t0 = datetime.datetime.now()
-    rid = c.create_line(points)
+    state = {"slot": slot_of(t0), "mileage": mileage, "wait": wait, "steps": steps,
+             "pace": pace, "start_time": t0.isoformat(timespec="seconds"),
+             "points": [p["point_name"] for p in points], "record_id": None,
+             "status": "create_pending"}
+    save_run_state(state)                      # 发请求之前先落盘：失败也知道自己发过
+
+    try:
+        rid = c.create_line(points)
+    except BaseException:
+        state.update(status="create_unknown", error="createLine 未完成")
+        save_run_state(state)
+        raise
     if not rid:
-        sys.exit("createLine 失败，会话可能过期")
+        state.update(status="create_unknown", error="createLine 未返回 record_id")
+        save_run_state(state)
+        sys.exit("createLine 未返回 record_id，本地已标记 create_unknown；先到小程序核实再决定是否重跑")
+    state.update(status="created", record_id=rid)
+    save_run_state(state)
     print(f"[{t0:%H:%M:%S}] record_id={rid}  目标 {mileage}m / {wait}s")
 
     track = make_track(points, origin, mileage, wait)
@@ -509,13 +630,42 @@ def cmd_run(a):
             "end_time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "pass_point": len(points), "step_count": steps}
 
+    state["status"] = "checking"
+    save_run_state(state)
     ck = c.post("/xcxapi/checkRecord/", {"a": enc(body)})
-    print("checkRecord:", json.dumps(ck, ensure_ascii=False))
-    if (ck.get("data") or {}).get("status") == 0:
-        print("服务端预校验不通过，已中止（未落库）")
+    kind, reason, _ = check_verdict(ck)
+    print("checkRecord:", redact(json.dumps({"code": ck.get("code"), "status": (ck.get("data") or {}).get("status"),
+                                             "message": reason}, ensure_ascii=False)))
+    if kind == "unknown":
+        state.update(status="check_failed", reason=reason)
+        save_run_state(state)
+        print(f"校验状态无法识别（{reason}），已中止；本地标记 check_failed")
         return
+    if kind == "invalid" and not a.accept_invalid:
+        state.update(status="check_failed", reason=reason)
+        save_run_state(state)
+        print(f"服务端预校验不通过（{reason}），已中止（未落库）；确认可接受后加 --accept-invalid")
+        return
+    if kind == "invalid":
+        print(f"服务端判为不合格（{reason}），按 --accept-invalid 继续提交")
 
-    print("update:", json.dumps(c.post("/xcxapi/updateRecordNew/", {"a": enc(body)}), ensure_ascii=False))
+    state["status"] = "finish_pending"
+    save_run_state(state)
+    try:
+        up = c.post("/xcxapi/updateRecordNew/", {"a": enc(body)})
+    except BaseException:
+        state.update(status="finish_unknown", error="updateRecordNew 未完成")
+        save_run_state(state)
+        raise
+    print("update:", redact(json.dumps({"code": up.get("code"), "message": str(up.get("message") or "")[:120]},
+                                       ensure_ascii=False)))
+    if up.get("code") != 1:
+        state.update(status="finish_unknown", error=str(up.get("message") or "")[:200])
+        save_run_state(state)
+        print("updateRecordNew 未返回成功，本地标记 finish_unknown；轨迹未上传，先到小程序核实")
+        return
+    state["status"] = "record_updated"
+    save_run_state(state)
 
     ok = 0
     total_batch = (len(track) + 49) // 50
@@ -527,9 +677,16 @@ def cmd_run(a):
                    {"img_url": enc({"record_id": rid, "path_point": batch, "path_image": ""})})
         if r.get("code") == 1:
             ok += 1
+            state.update(uploaded_points=min(i + 50, len(track)))
         else:
-            print("  batch fail:", json.dumps(r, ensure_ascii=False))
+            state.update(status="finish_unknown", error="轨迹上传中断",
+                         uploaded_points=min(i, len(track)))
+            save_run_state(state)
+            print(f"  批次 {ok + 1}/{total_batch} 失败，本地标记 finish_unknown")
             break
+    else:
+        state.update(status="finished", uploaded_points=len(track))
+        save_run_state(state)
     print(f"track: {ok}/{total_batch} 批")
 
     d = c.record_info(rid).get("data", {})
@@ -568,7 +725,11 @@ def main():
     rp = sub.add_parser("run")
     rp.add_argument("--mileage", type=int, default=2000)
     rp.add_argument("--wait", type=int, default=0, help="时长秒；0 表示按服务端配速区间自动推算")
+    rp.add_argument("--force", action="store_true", help="忽略未收尾的本地记录（会在服务器上多建一条）")
+    rp.add_argument("--accept-invalid", action="store_true", help="接受服务端明确判不合格的结果，继续提交")
     rp.set_defaults(func=cmd_run)
+
+    sub.add_parser("abandon", help="停止跟踪未收尾的记录（不删除服务器上的记录）").set_defaults(func=cmd_abandon)
 
     a = ap.parse_args()
     a.func(a)
