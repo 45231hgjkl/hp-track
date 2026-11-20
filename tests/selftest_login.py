@@ -22,6 +22,13 @@ GOOD_PWD = "good-pass"
 GOOD_CODE = "123456"
 PHONE = "15583910181"
 
+# randrunInfo 的构造响应：data 里是当次三个考核点，顶层带起点与账号。
+# point_name 刻意与本地不再使用的硬编码点位不同，用来证明点位确实来自服务端。
+RANDRUN = {"code": 1, "message": "ok", "lat": 30.830092, "lng": 121.504504, "student_id": 13101,
+           "data": [{"id": 11, "point_name": "服务端点甲", "lat": "30.830100", "lng": "121.504500"},
+                    {"id": 12, "point_name": "服务端点乙", "lat": "30.831800", "lng": "121.501900"},
+                    {"id": 13, "point_name": "服务端点丙", "lat": "30.828600", "lng": "121.505800"}]}
+
 PASSED, FAILED = [], []
 
 
@@ -34,6 +41,8 @@ class Fake:
     """每次实例化可指定行为：mode=normal|expired"""
 
     calls = []
+    bodies = {}
+    points = None
 
     def __init__(self, sid=None, uid=None):
         self.sid, self.uid = sid, uid
@@ -76,6 +85,26 @@ class Fake:
         return {"code": 1, "data": {"total": 1, "list": [{
             "id": 5548410, "status": 1, "mileage": 2000,
             "running_time": 400, "start_time": "2026-11-19 13:00:00"}]}}
+
+    # ---- 跑步链路（run_job 会用到）----
+    def random_points(self, lat=None, lng=None):
+        Fake.calls.append(("randrunInfo", lat, lng))
+        return RANDRUN
+
+    def create_line(self, points):
+        Fake.points = points
+        Fake.calls.append(("createLine", len(points)))
+        return 987654
+
+    def post(self, path, body=None):
+        Fake.calls.append(("post", path))
+        Fake.bodies[path] = body
+        if path == "/xcxapi/checkRecord/":
+            return {"code": 1, "data": {"status": 1}}
+        return {"code": 1}
+
+    def record_info(self, rid):
+        return {"code": 1, "data": {"id": rid, "status": 1, "mileage": 2000, "running_time": 6}}
 
 
 def req(base, path, body=None, headers=None):
@@ -165,6 +194,49 @@ def main():
         s, j = req(base, "/api/login/password",
                    {"phone": PHONE, "password": GOOD_PWD}, {"Host": "attacker.com"})
         check("非法 Host 403", s == 403, f"{s} {j}")
+
+        print("\n[9] 指标口径（配速单位 / 步频夹取 / 头净化）")
+        prof = {"min_pace": 5.0, "max_pace": 6.5,
+                "min_step_frequency": 150, "max_step_frequency": 200,
+                "shortest_distance": 2000}
+        steps, pace, notes = core.plan_metrics(prof, 2000, 660)
+        check("pace 按分钟/公里", pace == 5.5, pace)
+        check("合规参数无告警", notes == [], notes)
+        check("步频落在服务端区间", 150 <= steps / (660 / 60) <= 200, steps)
+        _, _, bad = core.plan_metrics(prof, 2000, 400)
+        check("配速越界被识别", any("配速" in n for n in bad), bad)
+        wait_mid = core.plan_wait(prof, 2000)
+        check("plan_wait 落在配速区间内", 600 <= wait_mid <= 780, wait_mid)
+        check("缺字段不臆造约束", core.pace_range({}) is None and core.freq_range({}) is None)
+        check("header 注入被丢弃", core.clean_headers({"X-Session-ID": "a\r\nB: x"}) == {})
+        check("header 正常值保留", core.clean_headers({"X-Session-ID": "SID-1"}) == {"X-Session-ID": "SID-1"})
+
+        print("\n[10] 跑步链路（点位来自 randrunInfo）")
+        Fake.calls.clear()
+        Fake.bodies.clear()
+        W.run_job(2000, 6)
+        st = W.STATE["run"]
+        check("调用了 randrunInfo", any(c[0] == "randrunInfo" for c in Fake.calls), Fake.calls[:3])
+        names = [p.get("point_name") for p in (Fake.points or [])]
+        check("createLine 用服务端三点", names == ["服务端点甲", "服务端点乙", "服务端点丙"], names)
+        check("createLine 点位数为 3", len(Fake.points or []) == 3, Fake.points)
+        body = core.dec(Fake.bodies["/xcxapi/checkRecord/"]["a"])
+        check("提交体 pass_point=3", body.get("pass_point") == 3, body)
+        check("提交体 pace 为分钟/公里", abs(float(body.get("pace")) - 0.05) < 1e-9, body.get("pace"))
+        check("提交体步数为正整数",
+              isinstance(body.get("step_count"), int) and body["step_count"] > 0, body.get("step_count"))
+        check("任务跑到 done", st["phase"] == "done", st)
+        check("日志含服务端点位名", any("服务端点甲" in line for line in st["log"]), st["log"])
+        check("轨迹按批上传", any("轨迹批次" in line for line in st["log"]), st["log"])
+
+        print("\n[11] 参数越界在启动前拦截")
+        W.STATE["user"]["min_pace"] = 5.0
+        W.STATE["user"]["max_pace"] = 6.5
+        s, j = req(base, "/api/run/start", {"mileage": 2000, "wait": 400})
+        check("越界配速被拒", j.get("ok") is False and "配速" in (j.get("error") or ""), j)
+        check("返回建议时长", (j.get("suggest") or {}).get("wait", 0) > 0, j)
+        W.STATE["user"].pop("min_pace", None)
+        W.STATE["user"].pop("max_pace", None)
 
         print("\n[8] 退出清理")
         s, j = req(base, "/api/logout", {"purge": True})

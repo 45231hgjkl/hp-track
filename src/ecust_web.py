@@ -161,7 +161,7 @@ def rlog(msg: str):
 
 
 # ---------------- 后台跑步任务 ----------------
-def run_job(mileage: int, wait: int, pass_points: int = 3):
+def run_job(mileage: int, wait: int):
     st = STATE["run"]
     with LOCK:
         st.update(running=True, phase="create", elapsed=0, total=wait,
@@ -170,18 +170,30 @@ def run_job(mileage: int, wait: int, pass_points: int = 3):
         c = STATE["cli"]
         if c is None:
             raise SessionExpired("未登录")
+        profile = STATE["user"] or {}
 
-        pts = [{"lat": str(la), "lng": str(lo), "point_name": n}
-               for (la, lo), n in zip(core.RING[:3], core.POINT_NAMES)]
+        rlog("获取本次考核点位…")
+        try:
+            points, origin = core.parse_randrun(
+                secure(c.random_points, core.QUERY_LAT, core.QUERY_LNG))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        rlog("点位 " + " / ".join(p["point_name"] for p in points))
+
+        steps, pace, notes = core.plan_metrics(profile, mileage, wait)
+        if notes:
+            raise RuntimeError("；".join(notes))
+        rlog(f"指标 {mileage}m / {wait}s / {steps} 步 / {pace} min/km")
+
         rlog("创建跑步记录…")
-        rid = secure(c.create_line, pts)
+        rid = secure(c.create_line, points)
         if not rid:
             raise RuntimeError("createLine 失败，会话可能已过期")
         with LOCK:
             st["record_id"] = rid
         rlog(f"record_id = {rid}")
 
-        track = core.make_track(core.RING, mileage, wait)
+        track = core.make_track(points, origin, mileage, wait)
         rlog(f"生成轨迹 {len(track)} 点 / {mileage}m / {wait}s")
 
         t0 = time.time()
@@ -200,11 +212,11 @@ def run_job(mileage: int, wait: int, pass_points: int = 3):
         rlog("提交记录…")
         now = datetime.datetime.now()
         start = datetime.datetime.fromtimestamp(t0)
-        body = {"record_id": rid, "pace": round(wait / (mileage / 1000)),
+        body = {"record_id": rid, "pace": pace,
                 "running_time": wait, "mileage": mileage,
                 "start_time": (start + datetime.timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
                 "end_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "pass_point": pass_points, "step_count": max(30 * wait // 60, wait)}
+                "pass_point": len(points), "step_count": steps}
 
         ck = secure(c.post, "/xcxapi/checkRecord/", {"a": core.enc(body)})
         ok = (ck.get("data") or {}).get("status") == 1
@@ -220,9 +232,9 @@ def run_job(mileage: int, wait: int, pass_points: int = 3):
         done = 0
         total_b = (len(track) + 49) // 50
         for i in range(0, len(track), 50):
-            batch = [{"name": "", "lat": la, "lng": lo, "accuracy": ac,
-                      "timestamp": int((start + datetime.timedelta(seconds=j)).timestamp() * 1000)}
-                     for j, (la, lo, ac) in enumerate(track[i:i + 50], start=i)]
+            batch = [{"name": "", "lat": lat, "lng": lng, "accuracy": acc,
+                      "timestamp": int((start + datetime.timedelta(seconds=off)).timestamp() * 1000)}
+                     for (lat, lng, acc, off) in track[i:i + 50]]
             r = secure(c.post, "/xcxapi/uploadPathPointV3/",
                        {"img_url": core.enc({"record_id": rid, "path_point": batch, "path_image": ""})})
             if r.get("code") != 1:
@@ -300,8 +312,14 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             user = STATE["user"]
             phone = STATE["phone"]
+        pace = None
+        if user:
+            pr = core.pace_range(user)
+            pace = {"range": list(pr) if pr else None,
+                    "suggest": (pr[0] + pr[1]) / 2 if pr else core.PACE_FALLBACK}
         return {"ok": bool(user), "user": user,
-                "phone": core.mask_phone(phone) if phone else None}
+                "phone": core.mask_phone(phone) if phone else None,
+                "pace": pace}
 
     # ---- GET ----
     def do_GET(self):
@@ -489,10 +507,24 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if STATE["run"]["running"]:
                 return self._json({"ok": False, "error": "已有任务在跑"})
-        mileage = max(2000, int(b.get("mileage") or 2000))
-        wait = max(360, int(b.get("wait") or 400))
+            profile = STATE["user"] or {}
+
+        try:
+            mileage = max(2000, int(b.get("mileage") or 2000))
+            wait = int(b.get("wait") or 0)
+        except (TypeError, ValueError):
+            return self._json({"ok": False, "error": "里程和时长必须是整数"})
+        if wait <= 0:
+            wait = core.plan_wait(profile, mileage)
+        wait = max(360, wait)
+
+        steps, pace, notes = core.plan_metrics(profile, mileage, wait)
+        if notes:
+            return self._json({"ok": False, "error": "参数不合规：" + "；".join(notes),
+                               "suggest": {"wait": core.plan_wait(profile, mileage)}})
+
         threading.Thread(target=run_job, args=(mileage, wait), daemon=True).start()
-        self._json({"ok": True})
+        self._json({"ok": True, "mileage": mileage, "wait": wait, "steps": steps, "pace": pace})
 
 
 def _force_utf8_stdio():

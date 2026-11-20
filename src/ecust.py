@@ -6,6 +6,14 @@
   短信登录   POST /xcxapi/sendSMS/     {"iphone"}  → POST /xcxapi/login/ {"iphone","code"}
   会话复用   X-Session-ID 头，服务端以 code=-2 表示过期
 
+模拟指标口径（与小程序一致）:
+  点位      必须取当次 GET /xcxtapi/activity/randrunInfo?lat&lng 的 data
+            本地不编坐标，只负责把这三个点跑完
+  配速      pace 字段单位为「分钟/公里」= 时长秒 / 60 / 公里数
+  步频      step_count / (时长分钟)，用 getUserInfo 的上下限夹取
+  预校验    shortest_distance / min_pace / max_pace / min_step_frequency /
+            max_step_frequency 缺失即跳过该项，不臆造约束
+
 用法:
   python ecust.py login --phone 15583910181                 # 交互输入密码
   python ecust.py login --phone 15583910181 --password xxx
@@ -23,6 +31,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -67,10 +76,17 @@ def data_dir() -> str:
 
 SESSION_FILE = os.path.join(data_dir(), "session.json")
 
-# 奉贤校区必经点（randrunInfo 实测）；换校区改这里
-RING = [(30.830092, 121.504504), (30.831815, 121.501978),
-        (30.8286, 121.505815), (30.830092, 121.504504)]
-POINT_NAMES = ["图书馆北", "信息楼南", "南大门"]
+# randrunInfo 的查询坐标：只用来告诉服务端「我在奉贤校区」，不参与点位构造。
+# 考核点位一律以服务端当次返回的 data 为准（见 parse_randrun）。
+QUERY_LAT, QUERY_LNG = 30.830092, 121.504504
+
+# 服务端未给配速区间时的保守取值（分钟/公里），以及步频的默认中位值。
+PACE_FALLBACK = 5.5
+FREQ_FALLBACK = 172.0
+
+# Header 只放这些键；值是本地会话文件读回来的，必须过一遍净化。
+HEADER_KEYS = ("X-Session-ID", "Authorization")
+HEADER_VALUE_RE = re.compile(r"^[A-Za-z0-9._~+/=\-]{1,512}$")
 
 
 # ---------------- 加密 ----------------
@@ -83,6 +99,135 @@ def dec(text: str) -> dict:
     return pure_aes.dec(text, KEY)
 
 
+# ---------------- 指标口径 ----------------
+def _num(value):
+    """服务端字段可能是数字、数字字符串或 null。转不出来就返回 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _range(lo, hi, cap):
+    """取服务端给的双端区间；不合法（缺、反向、离谱）就当没给。"""
+    a, b = _num(lo), _num(hi)
+    if a is None or b is None or not (0 < a <= b <= cap):
+        return None
+    return a, b
+
+
+def pace_range(profile: dict):
+    """配速区间（分钟/公里）。服务端字段缺失时返回 None。"""
+    p = profile or {}
+    return _range(p.get("min_pace"), p.get("max_pace"), 30.0)
+
+
+def freq_range(profile: dict):
+    """步频区间（步/分钟）。"""
+    p = profile or {}
+    return _range(p.get("min_step_frequency"), p.get("max_step_frequency"), 300.0)
+
+
+def parse_randrun(payload):
+    """解析 randrunInfo，返回 (points, origin)。
+
+    points 为 3 个点位的原样字典（保留服务端给的 id / point_name 等字段），
+    origin 为服务端返回的起点 lat/lng（缺则退回第一个点位）。
+    形状容错：data 可能是 [3 点] 也可能是 {"points": [...], "lat":.., "lng":..}。
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("randrunInfo 响应不是 JSON 对象")
+    if payload.get("code") != 1:
+        msg = payload.get("message") or payload.get("msg") or "未知原因"
+        raise ValueError(f"randrunInfo 失败：{msg}")
+
+    data = payload.get("data")
+    if isinstance(data, list):
+        raw, meta = data, payload
+    elif isinstance(data, dict):
+        raw = data.get("points") or data.get("pass_point") or []
+        meta = {**payload, **data}
+    else:
+        raise ValueError("randrunInfo 响应缺少 data")
+
+    points = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        lat, lng = _num(item.get("lat")), _num(item.get("lng"))
+        if lat is None or lng is None or not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+            continue
+        name = str(item.get("point_name") or item.get("name") or "").strip()[:40] or "考核点"
+        # 原样回传服务端字段，只把坐标归一成字符串（小程序侧就是 string）
+        point = dict(item)
+        point["lat"], point["lng"], point["point_name"] = str(lat), str(lng), name
+        points.append(point)
+
+    if len(points) != 3:
+        raise ValueError(f"randrunInfo 返回 {len(points)} 个有效点位，需要 3 个")
+
+    olat, olng = _num(meta.get("lat")), _num(meta.get("lng"))
+    if olat is None or olng is None:
+        olat, olng = float(points[0]["lat"]), float(points[0]["lng"])
+    return points, {"lat": olat, "lng": olng}
+
+
+def plan_metrics(profile, mileage: int, seconds: int):
+    """按服务端区间产出一组能过预校验的指标。
+
+    返回 (steps, pace, notes)：
+      steps  步数（步频夹进区间）
+      pace   配速，单位分钟/公里，已 round
+      notes  不合规说明；空列表表示可以提交
+    """
+    km = mileage / 1000.0
+    if km <= 0 or seconds <= 0:
+        raise ValueError("里程和时长必须为正数")
+
+    pace = seconds / 60.0 / km
+    notes = []
+    pr = pace_range(profile)
+    if pr and not (pr[0] <= pace <= pr[1]):
+        notes.append(f"配速 {pace:.2f} min/km 不在服务端区间 {pr[0]:.2f}–{pr[1]:.2f}")
+
+    freq = FREQ_FALLBACK
+    fr = freq_range(profile)
+    if fr:
+        freq = min(max(freq, fr[0]), fr[1])
+    steps = max(1, int(round(freq * seconds / 60.0)))
+    return steps, round(pace, 2), notes
+
+
+def plan_wait(profile, mileage: int) -> int:
+    """给定里程，按服务端中值配速（或保守默认）推出时长秒数。"""
+    pr = pace_range(profile)
+    pace = (pr[0] + pr[1]) / 2 if pr else PACE_FALLBACK
+    return max(360, int(round(pace * mileage / 1000.0 * 60.0)))
+
+
+def clean_headers(headers: dict) -> dict:
+    """只保留白名单 header，并拒绝 CR/LF 等注入字符。
+
+    会话是从 session.json 读回来的，等于信任本地文件；这里加一道闸，
+    防止被改过的会话文件把任意头带进请求。
+    """
+    out = {}
+    for key, value in (headers or {}).items():
+        if key not in HEADER_KEYS:
+            continue
+        text = str(value)
+        if not HEADER_VALUE_RE.match(text):
+            continue
+        out[key] = text
+    return out
+
+
 # ---------------- 客户端 ----------------
 class Ecust:
     def __init__(self, sid: str = None, uid: int = None):
@@ -92,10 +237,9 @@ class Ecust:
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json", "User-Agent": "MicroMessenger/7.0.20"}
+        # 会话来自 session.json，先过白名单/字符净化再拼进请求
         if self.sid:
-            h["X-Session-ID"] = self.sid
-        if self.uid:
-            h["Authorization"] = ""
+            h.update(clean_headers({"X-Session-ID": self.sid}))
         return h
 
     def _req(self, path: str, body=None, method="POST"):
@@ -161,8 +305,8 @@ class Ecust:
         return self.get(f"/xcxapi/getUserInfo/?id={self.uid}")
 
     def random_points(self, lat=None, lng=None):
-        lat = lat if lat is not None else RING[0][0]
-        lng = lng if lng is not None else RING[0][1]
+        lat = lat if lat is not None else QUERY_LAT
+        lng = lng if lng is not None else QUERY_LNG
         return self.get(f"/xcxtapi/activity/randrunInfo?lat={lat}&lng={lng}")
 
     def history(self, page=1, size=20):
@@ -224,24 +368,53 @@ def hav(a, b):
     return 2 * R * math.asin(math.sqrt(h))
 
 
-def make_track(ring, total_m, seconds, sigma=1.2e-5):
-    per = sum(hav(a, b) for a, b in zip(ring, ring[1:]))
-    laps = total_m / per
-    steps = len(ring) - 1
+def ring_from(points, origin):
+    """把「起点 + 三点」拼成闭环折线，首尾都是起点。"""
+    ring = [(float(origin["lat"]), float(origin["lng"]))]
+    ring += [(float(p["lat"]), float(p["lng"])) for p in points]
+    ring.append(ring[0])
+    return ring
+
+
+def make_track(points, origin, total_m, seconds, sigma=1.2e-5):
+    """沿闭环折线铺满 total_m 里程，每秒取一个采样点。
+
+    返回 [(lat, lng, accuracy, offset_seconds), ...]。offset 是相对起跑的秒数，
+    上传时用它算 timestamp —— 采样密度由这里决定，调用方不再假设「每秒一点」。
+
+    点位来自 randrunInfo，本函数只负责「怎么把这三个点跑完」。
+    """
+    if not points:
+        raise ValueError("缺少考核点位")
+    ring = ring_from(points, origin)
+    seg = [hav(a, b) for a, b in zip(ring, ring[1:])]
+    per = sum(seg)
+    if per <= 0:
+        raise ValueError("点位重合，无法生成轨迹")
+
+    total_m = max(float(total_m), 1.0)
+    seconds = max(1, int(seconds))
+    count = max(2, int(total_m / 0.5) + 1)
     dense = []
-    for i in range(int(laps * 600) + 1):
-        t = (i / 600) % 1.0
-        seg, nxt = ring[int(t * steps)], ring[int(t * steps) + 1]
-        f = t * steps - int(t * steps)
-        dense.append((seg[0] + (nxt[0] - seg[0]) * f, seg[1] + (nxt[1] - seg[1]) * f))
+    for k in range(count):
+        s = total_m * k / (count - 1)
+        d, acc = s % per, 0.0
+        for i, seg_len in enumerate(seg):
+            if d <= acc + seg_len or i == len(seg) - 1:
+                f = (d - acc) / seg_len if seg_len > 0 else 0.0
+                f = min(1.0, max(0.0, f))
+                a, b = ring[i], ring[i + 1]
+                dense.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+                break
+            acc += seg_len
+
     rng = random.Random()
-    step = len(dense) / max(1, seconds)
     out = []
     for i in range(seconds):
-        p = dense[int(i * step) % len(dense)]
-        out.append((round(p[0] + rng.gauss(0, sigma), 6),
-                    round(p[1] + rng.gauss(0, sigma), 6),
-                    round(rng.uniform(4.0, 9.0), 1)))
+        lat, lng = dense[int(i * (len(dense) - 1) / max(1, seconds - 1))]
+        out.append((round(lat + rng.gauss(0, sigma), 6),
+                    round(lng + rng.gauss(0, sigma), 6),
+                    5.0, i))
     return out
 
 
@@ -295,42 +468,61 @@ def cmd_history(a):
 
 def cmd_run(a):
     c = client_from_session()
-    pts = [{"lat": str(la), "lng": str(lo), "point_name": n}
-           for (la, lo), n in zip(RING[:3], POINT_NAMES)]
+    info = c.userinfo()
+    if info.get("code") != 1:
+        sys.exit(f"读取用户信息失败：{info.get('message') or info}")
+    profile = info.get("data") or {}
+
+    print("获取本次考核点位…")
+    try:
+        points, origin = parse_randrun(c.random_points(QUERY_LAT, QUERY_LNG))
+    except ValueError as e:
+        sys.exit(f"{e}（未到开放时段或会话已过期）")
+    print("点位:", " / ".join(p["point_name"] for p in points))
+
+    mileage = max(2000, int(a.mileage))
+    wait = int(a.wait) if a.wait > 0 else plan_wait(profile, mileage)
+    wait = max(360, wait)
+    steps, pace, notes = plan_metrics(profile, mileage, wait)
+    if notes:
+        sys.exit("参数不合规：" + "；".join(notes) + f"。建议 --wait ≈ {plan_wait(profile, mileage)} 秒")
+    print(f"指标 {mileage}m / {wait}s / {steps} 步 / 配速 {pace} min/km")
+
     t0 = datetime.datetime.now()
-    rid = c.create_line(pts)
+    rid = c.create_line(points)
     if not rid:
         sys.exit("createLine 失败，会话可能过期")
-    print(f"[{t0:%H:%M:%S}] record_id={rid}  目标 {a.mileage}m / {a.wait}s")
+    print(f"[{t0:%H:%M:%S}] record_id={rid}  目标 {mileage}m / {wait}s")
 
-    track = make_track(RING, a.mileage, a.wait)
-    left = a.wait - (datetime.datetime.now() - t0).total_seconds()
+    track = make_track(points, origin, mileage, wait)
+    left = wait - (datetime.datetime.now() - t0).total_seconds()
     while left > 0:
         time.sleep(min(5, max(0.5, left)))
-        left = a.wait - (datetime.datetime.now() - t0).total_seconds()
+        left = wait - (datetime.datetime.now() - t0).total_seconds()
         print(f"\r  剩余 {int(left):>4}s", end="", flush=True)
     print()
 
     now = datetime.datetime.now()
-    body = {"record_id": rid, "pace": round(a.wait / (a.mileage / 1000)),
-            "running_time": a.wait, "mileage": a.mileage,
+    body = {"record_id": rid, "pace": pace,
+            "running_time": wait, "mileage": mileage,
             "start_time": (t0 + datetime.timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
             "end_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "pass_point": len(pts), "step_count": max(30 * a.wait // 60, a.wait)}
+            "pass_point": len(points), "step_count": steps}
 
     ck = c.post("/xcxapi/checkRecord/", {"a": enc(body)})
     print("checkRecord:", json.dumps(ck, ensure_ascii=False))
-    if ck.get("data", {}).get("status") == 0:
+    if (ck.get("data") or {}).get("status") == 0:
         print("服务端预校验不通过，已中止（未落库）")
         return
 
     print("update:", json.dumps(c.post("/xcxapi/updateRecordNew/", {"a": enc(body)}), ensure_ascii=False))
 
     ok = 0
+    total_batch = (len(track) + 49) // 50
     for i in range(0, len(track), 50):
-        batch = [{"name": "", "lat": la, "lng": lo, "accuracy": ac,
-                  "timestamp": int((t0 + datetime.timedelta(seconds=j)).timestamp() * 1000)}
-                 for j, (la, lo, ac) in enumerate(track[i:i + 50], start=i)]
+        batch = [{"name": "", "lat": lat, "lng": lng, "accuracy": acc,
+                  "timestamp": int((t0 + datetime.timedelta(seconds=off)).timestamp() * 1000)}
+                 for (lat, lng, acc, off) in track[i:i + 50]]
         r = c.post("/xcxapi/uploadPathPointV3/",
                    {"img_url": enc({"record_id": rid, "path_point": batch, "path_image": ""})})
         if r.get("code") == 1:
@@ -338,7 +530,7 @@ def cmd_run(a):
         else:
             print("  batch fail:", json.dumps(r, ensure_ascii=False))
             break
-    print(f"track: {ok}/{(len(track) + 49) // 50} 批")
+    print(f"track: {ok}/{total_batch} 批")
 
     d = c.record_info(rid).get("data", {})
     print("RESULT:", json.dumps({k: d.get(k) for k in
@@ -375,7 +567,7 @@ def main():
 
     rp = sub.add_parser("run")
     rp.add_argument("--mileage", type=int, default=2000)
-    rp.add_argument("--wait", type=int, default=400)
+    rp.add_argument("--wait", type=int, default=0, help="时长秒；0 表示按服务端配速区间自动推算")
     rp.set_defaults(func=cmd_run)
 
     a = ap.parse_args()

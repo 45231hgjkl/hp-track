@@ -201,9 +201,9 @@ td.n{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
     <div class="card">
       <h2>自动校园跑</h2>
       <div class="presets" id="presets">
-        <button class="preset on" data-m="2000"><b>2.0 km</b><span>达标线 · 7分</span></button>
-        <button class="preset" data-m="3000"><b>3.0 km</b><span>10 分钟</span></button>
-        <button class="preset" data-m="5000"><b>5.0 km</b><span>17 分钟</span></button>
+        <button class="preset on" data-m="2000"><b>2.0 km</b><span>达标线 · 约11分</span></button>
+        <button class="preset" data-m="3000"><b>3.0 km</b><span>约17 分钟</span></button>
+        <button class="preset" data-m="5000"><b>5.0 km</b><span>约28 分钟</span></button>
       </div>
 
       <div class="ringbox">
@@ -240,7 +240,7 @@ const el = (t, c) => { const e = document.createElement(t); if (c) e.className =
 const LS_PHONE = 'hp_track_phone';
 
 let ME = null, MILEAGE = 2000, POLL = null, LAST_RESULT = null;
-let RELOGIN_DONE = false, TAB = 'pwd';
+let RELOGIN_DONE = false, TAB = 'pwd', PACE = 5.5;
 
 // ---------- HTTP ----------
 async function api(path, body) {
@@ -455,6 +455,8 @@ function enter(user) {
 function renderUser() {
   if (!ME) return;
   const u = ME;
+  PACE = paceOf(u);
+  refreshPlan();
   $('#uName').textContent = u.nickname || u.name || '同学';
   $('#uSub').textContent = [u.school, u.faculty, u.myclass].filter(Boolean).join(' · ');
   if (u.headimg) $('#avatar').src = u.headimg; else $('#avatar').removeAttribute('src');
@@ -488,13 +490,38 @@ document.querySelectorAll('.preset').forEach(b => {
   b.onclick = () => {
     document.querySelectorAll('.preset').forEach(x => x.classList.toggle('on', x === b));
     MILEAGE = +b.dataset.m;
+    refreshPlan();
   };
 });
 
+// 配速取服务端 min_pace/max_pace 的中值（分钟/公里）；字段缺失就退回保守默认值
+function paceOf(u) {
+  const lo = Number(u && u.min_pace), hi = Number(u && u.max_pace);
+  if (Number.isFinite(lo) && Number.isFinite(hi) && lo > 0 && hi >= lo && hi <= 30) return (lo + hi) / 2;
+  return 5.5;
+}
+
+function runSeconds() {
+  return Math.max(360, Math.round(PACE * MILEAGE / 1000 * 60));
+}
+
+function refreshPlan() {
+  const secs = runSeconds();
+  $('#rTotal').textContent = '/ ' + fmt(secs);
+  $('#phaseText').textContent =
+    `${(MILEAGE / 1000).toFixed(1)} km · 配速 ${PACE.toFixed(2)} min/km · 约 ${fmt(secs)}，`
+    + '点位由服务端下发，等待期间不要关闭页面。';
+}
+
 $('#btnRun').onclick = async () => {
   $('#btnRun').disabled = true;
-  const r = await api('/api/run/start', { mileage: MILEAGE, wait: Math.round(MILEAGE / 1000 * 200) });
-  if (!r.ok) { $('#btnRun').disabled = false; $('#phaseText').textContent = r.error || '启动失败'; }
+  const r = await api('/api/run/start', { mileage: MILEAGE, wait: runSeconds() });
+  if (!r.ok) {
+    $('#btnRun').disabled = false;
+    $('#phaseText').textContent = r.suggest && r.suggest.wait
+      ? `${r.error || '启动失败'}（建议时长 ${r.suggest.wait} 秒）`
+      : (r.error || '启动失败');
+  }
 };
 
 const PHASE_CN = { idle:'就绪', create:'创建记录', wait:'跑步中', submit:'提交记录', upload:'上传轨迹', done:'完成', error:'失败' };
@@ -522,7 +549,7 @@ async function poll() {
   if (s.result && s.result.id !== LAST_RESULT) {
     LAST_RESULT = s.result.id;
     $('#phaseText').innerHTML =
-      `完成 ${s.result.mileage/1000} km · ${fmt(s.result.running_time)} · 配速 ${s.result.pace}s/km<br>` +
+      `完成 ${(s.result.mileage/1000).toFixed(2)} km · ${fmt(s.result.running_time)} · 配速 ${Number(s.result.pace||0).toFixed(2)} min/km<br>` +
       `<span style="color:var(--accent)">${s.result.warning || ''}</span>`;
     loadHistory();
     const me = await api('/api/refresh', {});
@@ -530,7 +557,7 @@ async function poll() {
   } else if (s.error) {
     $('#phaseText').textContent = s.error;
   } else if (!s.running) {
-    $('#phaseText').textContent = '选择里程后开始，服务端按真实耗时校验，等待期间不要关闭页面。';
+    refreshPlan();
   }
 }
 
