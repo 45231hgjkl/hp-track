@@ -19,6 +19,7 @@ venv/
 
 # ---------- 运行期数据（含凭据，禁止入库） ----------
 session.json
+run_state.json
 *.session
 *.db
 *.sqlite
@@ -38,8 +39,8 @@ android/captures/
 *.class
 *.dex
 # Gradle 从 src/ 同步过来的运行时文件，源在 src/
-android/app/src/main/python/ecust.py
-android/app/src/main/python/ecust_web.py
+android/app/src/main/python/school.py
+android/app/src/main/python/school_web.py
 android/app/src/main/python/pure_aes.py
 android/app/src/main/assets/index.html
 

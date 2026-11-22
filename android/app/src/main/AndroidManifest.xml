@@ -10,10 +10,11 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- usesCleartextTraffic 必须为 true：Android 壳用 WebView 加载本机 127.0.0.1:8737
-         的 http 服务。对外流量只有 https://run.ecust.edu.cn，明文仅限回环。 -->
+         的 http 服务。对外只连学校服务器（HTTPS），明文仅限回环。 -->
     <application
         android:name=".HpTrackApp"
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
         android:allowBackup="false"
         android:supportsRtl="true">

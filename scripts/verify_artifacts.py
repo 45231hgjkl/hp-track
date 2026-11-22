@@ -4,7 +4,7 @@
 做四件事：
   1. 起产物进程（--no-browser）
   2. 轮询 127.0.0.1:PORT，等页面可达
-  3. GET / 断言含 <title>健康跑控制台；GET /api/session 断言 JSON 结构
+  3. GET / 断言含 <title>校园跑控制台；GET /api/session 断言 JSON 结构
   4. POST /api/shutdown，断言进程在超时内退出
 
 不联网、不登录、不读真实账号。

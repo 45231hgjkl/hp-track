@@ -15,7 +15,7 @@
 | Linux / macOS | zipapp | `linux-x64/hp-track.pyz` 64 KB | 要 python3 ≥ 3.8 | ✅ 冒烟 A1–A4 |
 | Android | Chaquopy（CPython 进 APK 进程）+ 前台服务 | `android-arm64/hp-track.apk` 11.94 MB | 不要 | ✅ 结构/保活验收 K1–K7；真机待 M7 |
 
-业务代码只有 `src/ecust.py` + `src/ecust_web.py`，三端共用；壳只做三件事：
+业务代码只有 `src/school.py` + `src/school_web.py`，三端共用；壳只做三件事：
 把 `127.0.0.1:8737` 跑起来、把页面显示出来、别被系统杀掉。
 
 ---
@@ -28,7 +28,7 @@
 | A2 | `GET /api/session` 返回合法 JSON | 同上 |
 | A3 | 未知路由 404 | 同上 |
 | A4 | `POST /api/shutdown` 后进程退出 | 同上（APK 走通知栏「停止」） |
-| A5 | 真实登录可达 `run.ecust.edu.cn` | 手工：错密码应回「账号或密码不正确！」 |
+| A5 | 真实登录可达学校服务器 | 手工：错密码应回「账号或密码不正确！」 |
 | A6 | 会话落点不丢 | 手工：重启看 `session.json` |
 | A7 | 重复启动不端口冲突 | 手工：二次启动只开浏览器 |
 | K1–K7 | APK 模块/资源/ABI/签名/版本/保活声明 | `scripts/verify_apk.py` |
@@ -42,8 +42,8 @@
 
 | 变量 | 位置 | 作用 |
 |---|---|---|
-| `HP_TRACK_HOME` | `src/ecust.py: data_dir()` | 会话目录；安卓指 `filesDir/hp-track`（APK 内 `__file__` 只读） |
-| `HP_TRACK_INDEX` | `src/ecust_web.py: read_asset()` | `index.html` 实体路径；安卓由壳从 assets 复制到私有目录 |
+| `HP_TRACK_HOME` | `src/school.py: data_dir()` | 会话目录；安卓指 `filesDir/hp-track`（APK 内 `__file__` 只读） |
+| `HP_TRACK_INDEX` | `src/school_web.py: read_asset()` | `index.html` 实体路径；安卓由壳从 assets 复制到私有目录 |
 
 ---
 
@@ -58,12 +58,13 @@
 | 项 | 处理 |
 |---|---|
 | 资源随包 | `--add-data "$root\src\index.html;."`（必须绝对路径，`--specpath` 会改变相对路径解析） |
-| 入口 | `--paths src` + `src\ecust_web.py` |
+| 入口 | `--paths src` + `src\school_web.py` |
 | 中间产物 | `--workpath .build\pyi-work --specpath .build\pyi-spec`（根目录不再出现 `*.spec`） |
 | 保留 `ssl` | 排除清单不能含 `ssl`，HTTPS 必需 |
 | 排除 | `cryptography` `mitmproxy` `frida` `tkinter` `unittest` `pydoc` `setuptools` `pkg_resources` |
 
-待办：图标与版本信息、代码签名（压 Defender 误报）、`--onedir` 便携版。
+待办：版本信息（exe 文件属性）、代码签名（压 Defender 误报）、`--onedir` 便携版。
+图标已完成：`assets/icon.ico` 由 `scripts/make_icons.py` 从 `logo.png` 生成，`build_windows.ps1` 传 `--icon`。
 
 ---
 
@@ -105,7 +106,7 @@ android/
     └── src/main/
         ├── AndroidManifest.xml   INTERNET + FGS + WAKE_LOCK + 忽略电池优化；Service(specialUse)
         ├── java/dev/hptrack/     HpTrackApp / HpTrackService / MainActivity
-        ├── python/entry.py       start(port, home, index) → 环境变量 → ecust_web.main()
+        ├── python/entry.py       start(port, home, index) → 环境变量 → school_web.main()
         └── assets/index.html     由 Gradle 从 ../src 同步
 ```
 
@@ -198,7 +199,7 @@ android job 环境：`setup-java 21` + `android-actions/setup-android` + `sdkman
 
 | 组合 | 代码份数 | 改接口要动 | 重建命令 |
 |---|---|---|---|
-| **Py 三壳（当前）** | 1 | `src/ecust.py`（+ `src/index.html` 若字段显示变） | 3 条 |
+| **Py 三壳（当前）** | 1 | `src/school.py`（+ `src/index.html` 若字段显示变） | 3 条 |
 | Go + Kotlin 壳 | 2 | 两处 | 3 条 |
 | 再加 Swift | 3 | 三处 | 4 条 |
 

@@ -2,7 +2,7 @@
 """pure_aes.py — AES-128-CBC 纯标准库实现
 
 替换 cryptography 依赖：只用到内置的 base64/json。
-接口与 ecust.py 里的 enc/dec 完全等价。
+接口与 school.py 里的 enc/dec 完全等价。
 
     python pure_aes.py      # 与 cryptography 对拍
 
@@ -165,7 +165,7 @@ def cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
     return bytes(out)
 
 
-# ---------------- 与 ecust.py 同签名的 enc/dec ----------------
+# ---------------- 与 school.py 同签名的 enc/dec ----------------
 KEY = b"A7fK92LmXyQw8vRp"
 
 

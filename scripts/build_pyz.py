@@ -38,7 +38,7 @@ def main() -> int:
     if os.path.exists(out):
         os.remove(out)
 
-    zipapp.create_archive(stage, target=out, main="ecust_web:main", interpreter=a.interpreter)
+    zipapp.create_archive(stage, target=out, main="school_web:main", interpreter=a.interpreter)
     os.chmod(out, os.stat(out).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"产物: {out}  ({os.path.getsize(out)} B)  v{paths.version()}")
     print(f"试跑: python3 {os.path.basename(out)} --no-browser")

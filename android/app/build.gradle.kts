@@ -58,14 +58,14 @@ chaquopy {
 
 /**
  * 把仓库 src/ 下的 4 个运行时文件同步进 APK 工程，避免第二份副本漂移。
- *   ecust.py / ecust_web.py / pure_aes.py → src/main/python（Chaquo 打进 app.imy）
+ *   school.py / school_web.py / pure_aes.py → src/main/python（Chaquo 打进 app.imy）
  *   index.html → assets/index.html（服务首次启动时复制到私有目录）
  */
 val repoRoot = rootProject.projectDir.parentFile
 
 val syncRuntime by tasks.registering(Copy::class) {
     from(File(repoRoot, "src")) {
-        include("ecust.py", "ecust_web.py", "pure_aes.py")
+        include("school.py", "school_web.py", "pure_aes.py")
     }
     into(layout.projectDirectory.dir("src/main/python"))
 }

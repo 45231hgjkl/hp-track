@@ -2,11 +2,12 @@
 """verify_apk.py — APK 结构验收（无真机也能跑的静态断言）
 
 检查项：
-  K1 assets/chaquopy/app.imy 里含 ecust.py / ecust_web.py / pure_aes.py / entry.py
+  K1 assets/chaquopy/app.imy 里含 school.py / school_web.py / pure_aes.py / entry.py
   K2 assets/index.html 与仓库根 index.html 字节一致
   K3 lib/ 里只有 arm64-v8a，且 libpython3.12.so 存在
   K4 AndroidManifest 能解出 package / minSdk / targetSdk（调 aapt2，可缺省）
   K5 签名块存在（APK 末尾有 v2 签名 magic "APK Sig Block 42"）
+  K8 图标资源：传统 mipmap + 自适应前景 + mipmap-anydpi-v26 声明
 
 用法:
     python scripts/verify_apk.py dist/hp-track.apk [--sdk C:\\...\\Android\\Sdk]
@@ -24,7 +25,7 @@ except Exception:
     pass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULES = ["ecust.py", "ecust_web.py", "pure_aes.py", "entry.py"]
+MODULES = ["school.py", "school_web.py", "pure_aes.py", "entry.py"]
 SIG_MAGIC = b"APK Sig Block 42"
 
 
@@ -146,6 +147,15 @@ def main() -> int:
                 print(f"FAIL K6 manifest 缺 {miss}")
             else:
                 print("ok   K6 前台服务 + 保活权限全部就位")
+
+            # K8: 图标。AGP 在 release 里会重命名资源（res/9w.png），只能看 badging 的引用
+            icon_line = next((ln for ln in out.stdout.splitlines() if ln.startswith("application:")), "")
+            icon_ref = icon_line.split("icon=")[-1].strip() if "icon=" in icon_line else ""
+            if icon_ref.startswith("'res/"):
+                print(f"ok   K8 应用图标已生效（{icon_ref}）")
+            else:
+                fails.append("manifest 未引用应用图标")
+                print(f"FAIL K8 manifest 未引用图标（{icon_line or '无 application 行'}）")
         else:
             print("skip K4 未找到 aapt2")
     else:

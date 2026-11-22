@@ -4,7 +4,7 @@
     HP_TRACK_HOME   可写目录（session.json 落这里，替代 %APPDATA%）
     HP_TRACK_INDEX  index.html 的实体路径（从 assets 复制到私有目录）
 
-之后直接把 ecust_web.main() 跑在调用线程里（阻塞，等于 serve_forever）。
+之后直接把 school_web.main() 跑在调用线程里（阻塞，等于 serve_forever）。
 """
 
 
@@ -14,7 +14,7 @@ def start(port: int, home: str, index: str) -> None:
 
     os.environ["HP_TRACK_HOME"] = home
     os.environ["HP_TRACK_INDEX"] = index
-    sys.argv = ["ecust_web", "--port", str(port), "--no-browser"]
+    sys.argv = ["school_web", "--port", str(port), "--no-browser"]
 
-    import ecust_web          # 必须在设置环境变量之后导入
-    ecust_web.main()
+    import school_web          # 必须在设置环境变量之后导入
+    school_web.main()

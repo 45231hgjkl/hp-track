@@ -2,7 +2,7 @@
 """stage.py — 组装可打包的运行时目录 .build/stage
 
 运行时只有 src/ 下的 4 个文件，研究/注入脚本一概不进产物：
-    src/ecust.py  src/ecust_web.py  src/pure_aes.py  src/index.html
+    src/school.py  src/school_web.py  src/pure_aes.py  src/index.html
 
 用法:
     python scripts/stage.py            # → .build/stage
@@ -20,7 +20,7 @@ except Exception:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
-RUNTIME = ["ecust.py", "ecust_web.py", "pure_aes.py", "index.html"]
+RUNTIME = ["school.py", "school_web.py", "pure_aes.py", "index.html"]
 
 
 def main() -> int:

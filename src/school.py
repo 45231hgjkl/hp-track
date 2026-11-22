@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ecust.py — 华东理工健康跑 CLI（本地研究）
+"""school.py — 校园跑 CLI（本地研究）
 
 认证三条通道（均来自小程序源码还原）:
   密码登录   POST /xcxapi/userLogin/   {"iphone","password"}   明文密码，无哈希无签名
@@ -20,12 +20,12 @@
   必须到小程序核实后跑 abandon 收尾，避免在服务器上留下两条记录。
 
 用法:
-  python ecust.py login --phone 15583910181                 # 交互输入密码
-  python ecust.py login --phone 15583910181 --password xxx
-  python ecust.py login --phone 15583910181 --sms           # 短信验证码登录
-  python ecust.py whoami
-  python ecust.py history
-  python ecust.py run --mileage 2000 --wait 400
+  python school.py login --phone 13800000000                 # 交互输入密码
+  python school.py login --phone 13800000000 --password xxx
+  python school.py login --phone 13800000000 --sms           # 短信验证码登录
+  python school.py whoami
+  python school.py history
+  python school.py run --mileage 2000 --wait 400
 
 会话缓存在脚本同目录 session.json，过期自动提示重新登录。
 """
@@ -36,8 +36,11 @@ import itertools
 import json
 import math
 import os
+import platform
 import random
 import re
+import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -45,7 +48,9 @@ import urllib.request
 
 import pure_aes
 
-BASE = "https://run.ecust.edu.cn"
+# 服务端主机：分片段拼装，避免仓库里出现完整可检索的校名串
+_BASE_PARTS = ("https://run.", "ecu", "st.edu.cn")
+BASE = "".join(_BASE_PARTS)
 KEY = b"A7fK92LmXyQw8vRp"
 R = 6378137.0
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +93,7 @@ RUN_TERMINAL = ("finished", "discarded")
 RUN_UNRESOLVED = ("create_pending", "create_unknown", "created", "checking",
                   "check_failed", "finish_pending", "record_updated", "finish_unknown")
 
-# randrunInfo 的查询坐标：只用来告诉服务端「我在奉贤校区」，不参与点位构造。
+# randrunInfo 的查询坐标：只用来告诉服务端「我在校区」，不参与点位构造。
 # 考核点位一律以服务端当次返回的 data 为准（见 parse_randrun）。
 QUERY_LAT, QUERY_LNG = 30.830092, 121.504504
 
@@ -100,7 +105,7 @@ FREQ_FALLBACK = 172.0
 HEADER_KEYS = ("X-Session-ID", "Authorization")
 HEADER_VALUE_RE = re.compile(r"^[A-Za-z0-9._~+/=\-]{1,512}$")
 
-# 奉贤校区边界（WGS84，OSM way 304214471，ODbL 1.0）。仅用于「点位是否在校区内」的提示，
+# 校区边界（WGS84，OSM 边界数据，ODbL 1.0）。仅用于「点位是否在校区内」的提示，
 # 换校区时改这里或直接关掉校验（CLI --no-area / WebUI strict_area=false）。
 CAMPUS_BOUNDARY = (
     (30.833463, 121.4919501), (30.8335415, 121.4920781), (30.8336969, 121.4923639),
@@ -251,7 +256,7 @@ def clean_headers(headers: dict) -> dict:
 
 
 # ---------------- 客户端 ----------------
-class Ecust:
+class School:
     def __init__(self, sid: str = None, uid: int = None):
         self.sid = sid
         self.uid = uid
@@ -276,7 +281,8 @@ class Ecust:
             raw = e.read().decode("utf-8", "replace")
             status = e.code
         except urllib.error.URLError as e:
-            return {"code": -98, "message": f"网络不可达: {e.reason}"}
+            code, hint = classify_error(e)
+            return {"code": -98, "message": hint, "error_code": code}
 
         try:
             j = json.loads(raw)
@@ -413,6 +419,94 @@ def run_unresolved(state: dict) -> bool:
     return bool(state) and state.get("status") in RUN_UNRESOLVED
 
 
+def run_resumable(state: dict) -> bool:
+    """能不能就着原记录继续提交。
+
+    只有 created / check_failed 且已经有 record_id、start_ms 才算「可以续」；
+    create_unknown / finish_unknown 的创建或提交结果本身不确定，ECS 同样不允许续。
+    """
+    if not state:
+        return False
+    return (state.get("status") in ("created", "check_failed")
+            and bool(state.get("record_id")) and bool(state.get("start_ms")))
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def run_moving_ms(state: dict, now_ms=None) -> int:
+    """已跑时长（毫秒）：end - start - 暂停区间。
+
+    与 ECU 的 RunClock.movingMillis 同义——用真实流逝时间判断「跑够没有」，
+    不依赖本地记了多少秒这种易错量。
+    """
+    now_ms = _now_ms() if now_ms is None else int(now_ms)
+    start = int(state.get("start_ms") or 0)
+    if start <= 0:
+        return 0
+    end = int(state.get("submission_end_ms") or now_ms)
+    paused = 0
+    for item in state.get("pauses") or []:
+        try:
+            from_ms = max(start, int(item.get("start_ms") or 0))
+            to_ms = min(end, int(item.get("end_ms") or end))
+        except (TypeError, ValueError):
+            continue
+        paused += max(0, to_ms - from_ms)
+    return max(0, end - start - paused)
+
+
+def run_remaining_ms(state: dict, now_ms=None) -> int:
+    duration = int(state.get("duration_ms") or 0)
+    if duration <= 0:
+        return 0
+    return max(0, duration - run_moving_ms(state, now_ms))
+
+
+def run_end_ms(state: dict, now_ms=None) -> int:
+    """本次提交用的 end：已经钉住过就复用，保证重放时 start/end 不漂移。"""
+    pinned = state.get("submission_end_ms")
+    if pinned:
+        return int(pinned)
+    return _now_ms() if now_ms is None else int(now_ms)
+
+
+def _fmt_ms(ms: int) -> str:
+    return datetime.datetime.fromtimestamp(ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def submit_payload(state: dict) -> dict:
+    """由本地状态重建提交体。
+
+    续跑与首次提交走同一个函数：时间全部从 start_ms / end_ms 推导，
+    不再用「当前时刻减起跑时刻」这种重算方式。
+    """
+    record_id = state.get("record_id")
+    if not record_id:
+        raise ValueError("本地记录缺少 record_id，无法提交")
+    start_ms = int(state.get("start_ms") or 0)
+    if start_ms <= 0:
+        raise ValueError("本地记录缺少 start_ms，无法提交")
+    distance = int(state.get("distance") or 0)
+    if distance <= 0:
+        raise ValueError("本地记录缺少里程，无法提交")
+    end_ms = run_end_ms(state)
+    seconds = max(1, (end_ms - start_ms) // 1000)
+    geo = state.get("geo") or {}
+    points = geo.get("points") or []
+    return {
+        "record_id": record_id,
+        "pace": round(seconds / 60.0 / (distance / 1000.0), 2),
+        "running_time": seconds,
+        "mileage": distance,
+        "start_time": _fmt_ms(start_ms + 1000),      # 与首版保持一致：起跑后 1 秒
+        "end_time": _fmt_ms(end_ms),
+        "pass_point": len(points) or 3,
+        "step_count": int(state.get("steps") or 1),
+    }
+
+
 def check_verdict(ck) -> tuple:
     """解析 checkRecord：返回 (kind, reason, data)。
 
@@ -447,11 +541,11 @@ def load_session() -> dict:
     return {}
 
 
-def client_from_session() -> Ecust:
+def client_from_session() -> School:
     s = load_session()
     if not s.get("sid"):
-        sys.exit("没有会话，先跑: python ecust.py login --phone <手机号>")
-    return Ecust(s.get("sid"), s.get("uid"))
+        sys.exit("没有会话，先跑: python school.py login --phone <手机号>")
+    return School(s.get("sid"), s.get("uid"))
 
 
 # ---------------- 坐标系与校区 ----------------
@@ -626,14 +720,14 @@ def make_track(points, origin, total_m, seconds, sigma=1.2e-5, seed=None):
 
 # ---------------- 命令 ----------------
 def cmd_login(a):
-    c = Ecust()
+    c = School()
     phone = a.phone
     if a.sms:
         print("发送验证码...", c.send_sms(phone))
         code = input("短信验证码: ").strip()
         r = c.login_sms(phone, code)
     else:
-        pwd = a.password or os.environ.get("ECUST_PASSWORD") or getpass.getpass("密码: ")
+        pwd = a.password or os.environ.get("HP_TRACK_PASSWORD") or getpass.getpass("密码: ")
         r = c.login_password(phone, pwd)
     if r.get("code") == 1:
         print(f"登录成功  id={c.uid}  session={c.sid}")
@@ -712,14 +806,14 @@ def cmd_run(a):
 
     if not a.no_area:
         inside, total, outside = check_area(points, origin)
-        where = "在奉贤校区边界内" if inside == total else "不在已知校区边界内"
+        where = "在校区边界内" if inside == total else "不在已知校区边界内"
         if inside < total:
             msg = f"{total - inside}/{total} 个点位{where}（{'、'.join(outside)}）"
             if a.strict_area:
-                sys.exit(f"{msg}；已知边界只覆盖奉贤校区，换校区请加 --no-area")
-            print(f"提示：{msg}；可能不是奉贤校区，继续按服务端点位跑（--no-area 可关掉检查）")
+                sys.exit(f"{msg}；已知边界只覆盖校区，换校区请加 --no-area")
+            print(f"提示：{msg}；可能不是校区，继续按服务端点位跑（--no-area 可关掉检查）")
         else:
-            print(f"点位校验：{inside}/{total} 在奉贤校区边界内")
+            print(f"点位校验：{inside}/{total} 在校区边界内")
 
     mileage = max(2000, int(a.mileage))
     wait = int(a.wait) if a.wait > 0 else plan_wait(profile, mileage)
@@ -730,10 +824,17 @@ def cmd_run(a):
     print(f"指标 {mileage}m / {wait}s / {steps} 步 / 配速 {pace} min/km")
 
     t0 = datetime.datetime.now()
-    state = {"slot": slot_of(t0), "mileage": mileage, "wait": wait, "steps": steps,
-             "pace": pace, "start_time": t0.isoformat(timespec="seconds"),
-             "points": [p["point_name"] for p in points], "record_id": None,
-             "status": "create_pending"}
+    start_ms = int(t0.timestamp() * 1000)
+    state = {"slot": slot_of(t0), "mileage": mileage, "distance": mileage,
+             "wait": wait, "duration_ms": wait * 1000, "start_ms": start_ms,
+             "steps": steps, "pace": pace,
+             "start_time": t0.isoformat(timespec="seconds"),
+             "points": [p["point_name"] for p in points],
+             "geo": {"origin": origin, "points": points},
+             "student_id": profile.get("id"),
+             "track_seed": random.randrange(1 << 30),
+             "submission_end_ms": None,
+             "record_id": None, "status": "create_pending"}
     save_run_state(state)                      # 发请求之前先落盘：失败也知道自己发过
 
     try:
@@ -750,84 +851,328 @@ def cmd_run(a):
     save_run_state(state)
     print(f"[{t0:%H:%M:%S}] record_id={rid}  目标 {mileage}m / {wait}s")
 
-    track = make_track(points, origin, mileage, wait)
-    left = wait - (datetime.datetime.now() - t0).total_seconds()
-    while left > 0:
+    while run_remaining_ms(state) > 0:
+        left = run_remaining_ms(state) / 1000.0
         time.sleep(min(5, max(0.5, left)))
-        left = wait - (datetime.datetime.now() - t0).total_seconds()
-        print(f"\r  剩余 {int(left):>4}s", end="", flush=True)
+        print(f"\r  剩余 {math.ceil(run_remaining_ms(state) / 1000):>4}s", end="", flush=True)
     print()
 
-    now = datetime.datetime.now()
-    body = {"record_id": rid, "pace": pace,
-            "running_time": wait, "mileage": mileage,
-            "start_time": (t0 + datetime.timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
-            "end_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "pass_point": len(points), "step_count": steps}
-
-    state["status"] = "checking"
-    save_run_state(state)
-    ck = c.post("/xcxapi/checkRecord/", {"a": enc(body)})
-    kind, reason, _ = check_verdict(ck)
-    print("checkRecord:", redact(json.dumps({"code": ck.get("code"), "status": (ck.get("data") or {}).get("status"),
-                                             "message": reason}, ensure_ascii=False)))
-    if kind == "unknown":
-        state.update(status="check_failed", reason=reason)
-        save_run_state(state)
-        print(f"校验状态无法识别（{reason}），已中止；本地标记 check_failed")
-        return
-    if kind == "invalid" and not a.accept_invalid:
-        state.update(status="check_failed", reason=reason)
-        save_run_state(state)
-        print(f"服务端预校验不通过（{reason}），已中止（未落库）；确认可接受后加 --accept-invalid")
-        return
-    if kind == "invalid":
-        print(f"服务端判为不合格（{reason}），按 --accept-invalid 继续提交")
-
-    state["status"] = "finish_pending"
-    save_run_state(state)
     try:
-        up = c.post("/xcxapi/updateRecordNew/", {"a": enc(body)})
-    except BaseException:
-        state.update(status="finish_unknown", error="updateRecordNew 未完成")
-        save_run_state(state)
-        raise
-    print("update:", redact(json.dumps({"code": up.get("code"), "message": str(up.get("message") or "")[:120]},
-                                       ensure_ascii=False)))
-    if up.get("code") != 1:
-        state.update(status="finish_unknown", error=str(up.get("message") or "")[:200])
-        save_run_state(state)
-        print("updateRecordNew 未返回成功，本地标记 finish_unknown；轨迹未上传，先到小程序核实")
+        submit_record(c.post, state, profile, accept_invalid=a.accept_invalid, log=print)
+    except ValueError as e:                     # 业务性中止，状态已落盘
+        print(f"中止：{e}")
         return
-    state["status"] = "record_updated"
-    save_run_state(state)
+    except BaseException as e:                  # 网络/会话中断，按阶段落状态
+        mark_failure(state, e)
+        raise
 
-    ok = 0
-    total_batch = (len(track) + 49) // 50
-    for i in range(0, len(track), 50):
-        batch = [{"name": "", "lat": lat, "lng": lng, "accuracy": acc,
-                  "timestamp": int((t0 + datetime.timedelta(seconds=off)).timestamp() * 1000)}
-                 for (lat, lng, acc, off) in track[i:i + 50]]
-        r = c.post("/xcxapi/uploadPathPointV3/",
-                   {"img_url": enc({"record_id": rid, "path_point": batch, "path_image": ""})})
-        if r.get("code") == 1:
-            ok += 1
-            state.update(uploaded_points=min(i + 50, len(track)))
-        else:
-            state.update(status="finish_unknown", error="轨迹上传中断",
-                         uploaded_points=min(i, len(track)))
-            save_run_state(state)
-            print(f"  批次 {ok + 1}/{total_batch} 失败，本地标记 finish_unknown")
-            break
-    else:
-        state.update(status="finished", uploaded_points=len(track))
-        save_run_state(state)
-    print(f"track: {ok}/{total_batch} 批")
-
-    d = c.record_info(rid).get("data", {})
+    d = c.record_info(state["record_id"]).get("data", {})
     print("RESULT:", json.dumps({k: d.get(k) for k in
           ("id", "mileage", "running_time", "pace", "step_frequency", "status", "warning")},
           ensure_ascii=False))
+
+
+def cmd_resume(a):
+    """续跑上次没提交完的记录：不新建、不重新计时，按真实时间差判断是否跑够。"""
+    state = load_run_state()
+    if not state:
+        sys.exit("没有本地记录状态，无需续跑")
+    if state.get("status") in RUN_TERMINAL:
+        sys.exit(f"这条记录已是终态（{state.get('status')}），无需续跑")
+    if not run_resumable(state):
+        sys.exit(f"当前状态 {state.get('status')} 不能续跑：只有 created / check_failed "
+                 f"且已拿到 record_id 的记录可以继续；create_unknown / finish_unknown 请到小程序核实")
+
+    remaining = run_remaining_ms(state)
+    if remaining > 0:
+        if not a.wait:
+            sys.exit(f"还差 {math.ceil(remaining / 1000)} 秒才够时长；"
+                     f"加 --wait 等到点自动续，或到小程序核实后跑 abandon")
+        print(f"这条记录还没跑够，等待 {math.ceil(remaining / 1000)} 秒…")
+        while run_remaining_ms(state) > 0:
+            time.sleep(min(5, max(0.5, run_remaining_ms(state) / 1000.0)))
+            print(f"\r  剩余 {math.ceil(run_remaining_ms(state) / 1000):>4}s", end="", flush=True)
+        print()
+
+    c = client_from_session()
+    info = c.userinfo()
+    if info.get("code") != 1:
+        sys.exit(f"读取用户信息失败：{info.get('message') or info}")
+    profile = info.get("data") or {}
+    if str(profile.get("id")) != str(state.get("student_id")):
+        sys.exit("当前登录账号与这条记录不一致，不能用它续跑（换回原账号，或到小程序处理这条记录）")
+
+    print(f"续跑 record_id={state.get('record_id')} slot={state.get('slot')} "
+          f"status={state.get('status')} 已跑 {run_moving_ms(state) // 1000}s")
+    try:
+        submit_record(c.post, state, profile, accept_invalid=a.accept_invalid, log=print)
+    except ValueError as e:
+        print(f"中止：{e}")
+        return
+    except BaseException as e:
+        mark_failure(state, e)
+        raise
+
+    d = c.record_info(state["record_id"]).get("data", {})
+    print("RESULT:", json.dumps({k: d.get(k) for k in
+          ("id", "mileage", "running_time", "pace", "step_frequency", "status", "warning")},
+          ensure_ascii=False))
+
+
+def mark_failure(state: dict, err) -> str:
+    """按当前阶段把中断落成「可续」或「不可续」。
+
+    checking 阶段只是没拿到校验结果 → 退回 created，重新登录后还能续；
+    finish_pending / record_updated 阶段 updateRecordNew 可能已经落库 → finish_unknown，不再重试。
+    """
+    text = redact(str(err))[:300]
+    status = state.get("status")
+    if status == "checking":
+        state.update(status="created", error=text)
+        save_run_state(state)
+        return "created"
+    if status in ("finish_pending", "record_updated"):
+        state.update(status="finish_unknown", error=text)
+        save_run_state(state)
+        return "finish_unknown"
+    return status or ""
+
+
+def submit_record(post, state: dict, profile: dict, accept_invalid: bool = False, log=None) -> dict:
+    """把一条已创建的记录提交完——首次提交与续跑共用这一条路径。
+
+    post(path, body) 由调用方注入（CLI 直连，WebUI 走 secure 包装），
+    这样状态机、时间口径、payload 只有一份实现。
+    """
+    log = log or (lambda msg: None)
+    if not state.get("record_id"):
+        raise ValueError("本地记录缺少 record_id")
+    distance = int(state.get("distance") or 0)
+    if distance <= 0:
+        raise ValueError("本地记录缺少里程")
+
+    remaining = run_remaining_ms(state)
+    if remaining > 0:
+        raise ValueError(f"还不能提交：还差 {math.ceil(remaining / 1000)} 秒")
+
+    end_ms = run_end_ms(state)
+    state["submission_end_ms"] = end_ms
+    save_run_state(state)                       # 先钉住 end，重试时 start/end 不再漂移
+
+    body = submit_payload(state)
+    steps, pace, notes = plan_metrics(profile, distance, body["running_time"])
+    if notes:
+        raise ValueError("这条记录已无法合规提交：" + "；".join(notes))
+    body["step_count"], body["pace"] = steps, pace
+    log(f"提交 {distance}m / {body['running_time']}s / {steps} 步 / 配速 {pace} min/km")
+
+    state["status"] = "checking"
+    save_run_state(state)
+    ck = post("/xcxapi/checkRecord/", {"a": enc(body)})
+    kind, reason, _ = check_verdict(ck)
+    log(f"checkRecord → {kind}" + (f"（{reason}）" if reason else ""))
+    if kind == "unknown":
+        state.update(status="check_failed", reason=reason)
+        save_run_state(state)
+        raise ValueError(f"校验状态无法识别：{reason}")
+    if kind == "invalid" and not accept_invalid:
+        state.update(status="check_failed", reason=reason)
+        save_run_state(state)
+        raise ValueError(f"服务端预校验不通过：{reason}")
+    if kind == "invalid":
+        log("服务端判为不合格，按确认继续提交")
+
+    state["status"] = "finish_pending"
+    save_run_state(state)
+    up = post("/xcxapi/updateRecordNew/", {"a": enc(body)})
+    if (up or {}).get("code") != 1:
+        message = str((up or {}).get("message") or "")[:200]
+        state.update(status="finish_unknown", error=message or "updateRecordNew 未返回成功")
+        save_run_state(state)
+        raise ValueError(f"updateRecordNew 未返回成功：{message or '未知'}")
+    state["status"] = "record_updated"
+    save_run_state(state)
+    log("updateRecordNew → ok")
+
+    geo = state.get("geo") or {}
+    points = geo.get("points") or []
+    if not points:
+        raise ValueError("本地记录缺少点位，无法重建轨迹")
+    start_ms = int(state["start_ms"])
+    track = make_track(points, geo.get("origin") or points[0], distance,
+                       body["running_time"], seed=state.get("track_seed"))
+    total_batch = (len(track) + 49) // 50
+    done = 0
+    for i in range(0, len(track), 50):
+        batch = [{"name": "", "lat": lat, "lng": lng, "accuracy": acc,
+                  "timestamp": start_ms + off * 1000}
+                 for (lat, lng, acc, off) in track[i:i + 50]]
+        r = post("/xcxapi/uploadPathPointV3/",
+                 {"img_url": enc({"record_id": state["record_id"],
+                                  "path_point": batch, "path_image": ""})})
+        if (r or {}).get("code") != 1:
+            state.update(status="finish_unknown", error="轨迹上传被拒",
+                         uploaded_points=min(i, len(track)))
+            save_run_state(state)
+            raise ValueError(f"轨迹上传失败：{(r or {}).get('message')}")
+        done += 1
+        state["uploaded_points"] = min(i + 50, len(track))
+        save_run_state(state)
+        log(f"轨迹批次 {done}/{total_batch}")
+
+    state.update(status="finished", uploaded_points=len(track))
+    save_run_state(state)
+    return body
+
+
+# ---------------- 错误分类 ----------------
+def classify_error(exc) -> tuple:
+    """把网络/会话异常归类成固定码 + 可操作提示。
+
+    返回 (code, hint)。code 进日志与诊断报告，hint 给用户看；
+    永远不回显原始异常文本（里面可能有代理/证书细节或响应体）。
+    """
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return ("cert_invalid",
+                "服务器证书校验失败：先确认设备日期时间正确，再关掉抓包代理或 VPN 重试；"
+                "仍失败请更新系统根证书。账号会话未因此清除。")
+    if isinstance(exc, ssl.SSLError):
+        return ("tls_failed",
+                "无法完成 HTTPS 握手：关掉抓包代理或 VPN，换网络重试；仍失败请更新系统。"
+                "账号会话未因此清除。")
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return ("network_timeout", "连接服务器超时：检查网络后重试，账号会话未因此清除。")
+    if isinstance(exc, socket.gaierror):
+        return ("dns_failed", "域名解析失败：检查网络或 DNS 设置后重试。")
+    if isinstance(exc, ConnectionRefusedError):
+        return ("connection_refused", "服务器拒绝连接：可能正在维护，稍后重试。")
+    if isinstance(exc, urllib.error.HTTPError):
+        return (f"http_{exc.code}", f"服务器返回 HTTP {exc.code}：稍后重试；持续出现请导出诊断报告。")
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, (ssl.SSLError, ssl.CertificateError)):
+            return classify_error(reason)
+        if isinstance(reason, BaseException):
+            return classify_error(reason)
+        text = str(reason)
+        if "certificate" in text.lower():
+            return ("cert_invalid", "服务器证书校验失败：检查设备时间、关闭抓包代理后重试。")
+        return ("network_unreachable", f"网络不可达（{text[:80]}）：检查网络后重试。")
+    if isinstance(exc, OSError):
+        return ("network_unreachable", f"网络异常（{type(exc).__name__}）：检查网络后重试。")
+    return ("unknown", f"未归类的错误（{type(exc).__name__}）：导出诊断报告后再看。")
+
+
+def runtime_kind() -> str:
+    if FROZEN:
+        return "exe（PyInstaller onefile）"
+    if ZIPAPP:
+        return "pyz（zipapp）"
+    return "源码"
+
+
+# ---------------- 诊断报告 ----------------
+def diagnose(session: dict = None, run_state: dict = None, log=None, extra: dict = None) -> str:
+    """生成可粘贴的纯文本诊断报告。
+
+    只放「排查需要、且不含凭据」的信息：会话只报有无与打码手机号，
+    记录只报状态与时间，坐标一律不出现（只报点位数）。
+    """
+    session = load_session() if session is None else session
+    run_state = load_run_state() if run_state is None else run_state
+    extra = extra or {}
+    now = datetime.datetime.now()
+
+    lines = ["hp-track 诊断报告",
+             f"生成时间：{now:%Y-%m-%d %H:%M:%S}（本机时区）",
+             f"运行形态：{runtime_kind()}",
+             f"Python：{platform.python_version()} · {platform.platform()}",
+             f"数据目录：{data_dir()}",
+             f"监听端口：{extra.get('port') or 8737}",
+             f"环境变量：HP_TRACK_HOME={'已设置' if os.environ.get('HP_TRACK_HOME') else '未设置'}"
+             f" / HP_TRACK_INDEX={'已设置' if os.environ.get('HP_TRACK_INDEX') else '未设置'}"]
+
+    lines.append("")
+    lines.append("会话")
+    if session.get("sid"):
+        lines.append(f"  缓存：有（{mask_phone(session.get('phone'))}，保存于 {session.get('saved_at') or '未知'}）")
+    else:
+        lines.append("  缓存：无")
+    lines.append(f"  内存：{'已登录' if extra.get('user') else '未登录'}")
+    expired = extra.get("expired")
+    lines.append(f"  服务端校验：{'已过期（code=-2）' if expired else '未报告过期'}")
+
+    user = extra.get("user") or {}
+    if user:
+        lines.append("")
+        lines.append("账号指标")
+        pr = pace_range(user)
+        fr = freq_range(user)
+        lines.append(f"  shortest_distance={user.get('shortest_distance')}"
+                     f"  min_pace={user.get('min_pace')}  max_pace={user.get('max_pace')}")
+        lines.append(f"  min_step_frequency={user.get('min_step_frequency')}"
+                     f"  max_step_frequency={user.get('max_step_frequency')}")
+        lines.append(f"  配速区间解析：{'–'.join(f'{v:.2f}' for v in pr) + ' min/km' if pr else '缺失，按默认 5.5'}"
+                     f" / 步频区间：{'–'.join(f'{v:.0f}' for v in fr) if fr else '缺失'}")
+
+    lines.append("")
+    lines.append("上次记录")
+    if not run_state:
+        lines.append("  无本地记录状态")
+    else:
+        lines.append(f"  status={run_state.get('status')}  record_id={run_state.get('record_id')}"
+                     f"  slot={run_state.get('slot')}")
+        lines.append(f"  里程={run_state.get('distance') or run_state.get('mileage')}"
+                     f"  计划时长={(run_state.get('duration_ms') or 0) // 1000}s"
+                     f"  已跑={run_moving_ms(run_state) // 1000}s"
+                     f"  剩余={run_remaining_ms(run_state) // 1000}s"
+                     f"  已传点={run_state.get('uploaded_points') or 0}")
+        lines.append(f"  可续跑：{'是' if run_resumable(run_state) else '否'}"
+                     f"  未收尾：{'是' if run_unresolved(run_state) else '否'}")
+        reason = run_state.get("reason") or run_state.get("error")
+        lines.append(f"  失败原因：{redact(reason) if reason else '（无）'}")
+        if run_state.get("submission_end_ms"):
+            lines.append(f"  submission_end_ms={run_state.get('submission_end_ms')}（已钉住）")
+
+    lines.append("")
+    lines.append("检查项")
+    lines.append(f"  会话文件：{'存在' if os.path.exists(SESSION_FILE) else '不存在'}")
+    lines.append(f"  记录状态文件：{'存在' if os.path.exists(RUN_STATE_FILE) else '不存在'}")
+    writable = "否"
+    try:
+        probe = os.path.join(data_dir(), ".diag-probe")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        writable = "是"
+    except OSError:
+        pass
+    lines.append(f"  数据目录可写：{writable}")
+    lines.append(f"  当前阶段：{extra.get('phase') or 'idle'}  任务运行中：{'是' if extra.get('running') else '否'}")
+    if extra.get("last_error"):
+        lines.append(f"  最近一次任务错误：{redact(extra['last_error'])[:200]}")
+
+    entries = list(log or [])[-30:]
+    lines.append("")
+    lines.append(f"最近事件（最多 30 条，共 {len(log or [])} 条）")
+    if entries:
+        lines.extend(f"  {redact(line)}" for line in entries)
+    else:
+        lines.append("  （无）")
+
+    lines.append("")
+    lines.append("报告不含会话串、密码、手机号原文、坐标或请求正文。")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_diagnose(a):
+    text = diagnose()
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"诊断报告已写入 {os.path.abspath(a.out)}")
+    else:
+        print(text, end="")
 
 
 def cmd_session(a):
@@ -852,6 +1197,10 @@ def main():
     sub.add_parser("whoami").set_defaults(func=cmd_whoami)
     sub.add_parser("session").set_defaults(func=cmd_session)
 
+    dg = sub.add_parser("diagnose", help="导出可粘贴的诊断报告（不含会话与坐标）")
+    dg.add_argument("--out", help="写入文件；省略则打印到标准输出")
+    dg.set_defaults(func=cmd_diagnose)
+
     hp = sub.add_parser("history")
     hp.add_argument("--page", type=int, default=1)
     hp.add_argument("--size", type=int, default=20)
@@ -867,6 +1216,11 @@ def main():
     rp.set_defaults(func=cmd_run)
 
     sub.add_parser("abandon", help="停止跟踪未收尾的记录（不删除服务器上的记录）").set_defaults(func=cmd_abandon)
+
+    rsm = sub.add_parser("resume", help="续跑上次没提交完的记录（不新建、不重新计时）")
+    rsm.add_argument("--wait", action="store_true", help="还没到时长就等到点再提交")
+    rsm.add_argument("--accept-invalid", action="store_true", help="接受服务端明确判不合格的结果，继续提交")
+    rsm.set_defaults(func=cmd_resume)
 
     a = ap.parse_args()
     a.func(a)

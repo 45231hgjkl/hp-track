@@ -44,6 +44,10 @@ $pyi = Join-Path $venv "Scripts\pyinstaller.exe"
 if (-not (Test-Path $pyi)) { throw "找不到 $pyi（先去掉 -SkipVenv 建一次环境）" }
 
 # 3) 打包：只带 src 下 4 个运行时文件，排除所有不需要的重模块
+$icon = Join-Path $root "assets\icon.ico"
+$iconArg = @()
+if (Test-Path $icon) { $iconArg = @("--icon", $icon) }
+
 & $pyi --onefile --name $Name `
   --add-data "$root\src\index.html;." `
   --paths src `
@@ -53,7 +57,7 @@ if (-not (Test-Path $pyi)) { throw "找不到 $pyi（先去掉 -SkipVenv 建一�
   --exclude-module cryptography --exclude-module tkinter --exclude-module unittest `
   --exclude-module pydoc --exclude-module setuptools --exclude-module pkg_resources `
   --exclude-module mitmproxy --exclude-module frida `
-  --noconfirm --clean src\ecust_web.py | Out-Host
+  @iconArg --noconfirm --clean src\school_web.py | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败" }
 
 $exe = Join-Path $outDir "$Name.exe"
